@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
+use common_config::Configurable;
 use common_telemetry::info;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::DatanodeOptions;
@@ -27,7 +28,9 @@ use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
+use crate::error::{
+    LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
+};
 use crate::options::{GlobalOptions, Options};
 use crate::App;
 
@@ -132,11 +135,11 @@ struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: DatanodeOptions = Options::load_layered_options(
+        let mut opts: DatanodeOptions = DatanodeOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            DatanodeOptions::env_list_keys(),
-        )?;
+        )
+        .context(LoadLayeredConfigSnafu)?;
 
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
@@ -253,13 +256,14 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
     use super::*;
-    use crate::options::{GlobalOptions, ENV_VAR_SEP};
+    use crate::options::GlobalOptions;
 
     #[test]
     fn test_read_from_config_file() {

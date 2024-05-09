@@ -343,8 +343,8 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
-        #[snafu(source)]
-        error: toml::ser::Error,
+        location: Location,
+        source: common_config::error::Error,
     },
 }
 
