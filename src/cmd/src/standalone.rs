@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -20,7 +21,7 @@ use cache::{default_cache_registry_builder, TABLE_CACHE_NAME};
 use catalog::kvbackend::KvBackendCatalogManager;
 use clap::Parser;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_config::{metadata_store_dir, KvBackendConfig};
+use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -41,7 +42,6 @@ use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
-use frontend::error::{Result as FeResult, TomlFormatSnafu};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -60,9 +60,9 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu,
-    InitTimezoneSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
-    StopProcedureManagerSnafu,
+    InitTimezoneSnafu, LoadLayeredConfigSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{GlobalOptions, Options};
 use crate::App;
@@ -127,12 +127,6 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
 }
 
-impl StandaloneOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["wal.broker_endpoints"])
-    }
-}
-
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
@@ -159,6 +153,16 @@ impl Default for StandaloneOptions {
             ],
             tracing: TracingOptions::default(),
         }
+    }
+}
+
+impl Configurable<'_> for StandaloneOptions {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn env_list_keys() -> Option<&'static [&'static str]> {
+        Some(&["wal.broker_endpoints"])
     }
 }
 
@@ -195,10 +199,6 @@ impl StandaloneOptions {
             rpc_addr: cloned_opts.grpc.addr,
             ..Default::default()
         }
-    }
-
-    pub fn to_toml(&self) -> FeResult<String> {
-        toml::to_string(self).context(TomlFormatSnafu)
     }
 }
 
@@ -288,11 +288,11 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+        let mut opts: StandaloneOptions = StandaloneOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
-            StandaloneOptions::env_list_keys(),
-        )?;
+        )
+        .context(LoadLayeredConfigSnafu)?;
 
         opts.mode = Mode::Standalone;
 
@@ -518,13 +518,14 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
     use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
 
     use super::*;
-    use crate::options::{GlobalOptions, ENV_VAR_SEP};
+    use crate::options::GlobalOptions;
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -766,8 +767,8 @@ mod tests {
 
     #[test]
     fn test_load_default_standalone_options() {
-        let options: StandaloneOptions =
-            Options::load_layered_options(None, "GREPTIMEDB_FRONTEND", None).unwrap();
+        let options =
+            StandaloneOptions::load_layered_options(None, "GREPTIMEDB_STANDALONE").unwrap();
         let default_options = StandaloneOptions::default();
         assert_eq!(options.mode, default_options.mode);
         assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
