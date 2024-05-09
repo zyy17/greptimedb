@@ -392,7 +392,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
             None,
         )
         .with_metrics_handler(MetricsHandler)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml_string())
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     (http_server.build(http_server.make_app()), instance.guard)
 }
