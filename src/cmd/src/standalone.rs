@@ -34,7 +34,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_wal::config::StandaloneWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
@@ -62,7 +62,7 @@ use crate::error::{
     StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
 
 #[derive(Parser)]
@@ -72,11 +72,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -87,13 +87,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -122,6 +122,7 @@ pub struct StandaloneOptions {
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
     pub export_metrics: ExportMetricsOption,
+    pub tracing: TracingOptions,
 }
 
 impl Default for StandaloneOptions {
@@ -148,6 +149,7 @@ impl Default for StandaloneOptions {
                 RegionEngineConfig::Mito(MitoConfig::default()),
                 RegionEngineConfig::File(FileEngineConfig::default()),
             ],
+            tracing: TracingOptions::default(),
         }
     }
 }
@@ -279,17 +281,15 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Standalone(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                StandaloneOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
+        Ok(self.merge_with_cli_options(
+            global_options,
+            StandaloneOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )?)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -354,13 +354,27 @@ impl StartCommand {
 
         opts.user_provider.clone_from(&self.user_provider);
 
+        #[cfg(feature = "tokio-console")]
+        if let Some(tokio_console_addr) = &global_options.tokio_console_addr {
+            opts.tracing = TracingOptions {
+                tokio_console_addr: Some(tokio_console_addr.clone()),
+            };
+        }
+
         Ok(opts)
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-standalone",
+            &opts.logging,
+            &opts.tracing.clone(),
+            None,
+        );
+
         info!("Standalone start command: {:#?}", self);
         info!("Building standalone instance with {opts:#?}");
 
@@ -610,10 +624,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let options = cmd.load_options(&GlobalOptions::default()).unwrap();
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
@@ -666,7 +677,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(opts) = cmd
+        let opts = cmd
             .load_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
@@ -674,10 +685,7 @@ mod tests {
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap()
-        else {
-            unreachable!()
-        };
+            .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
@@ -739,11 +747,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Standalone(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = command.load_options(&GlobalOptions::default()).unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_config::config::Configurable;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
@@ -46,6 +46,7 @@ pub struct FrontendOptions {
     pub datanode: DatanodeOptions,
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
+    pub tracing: TracingOptions,
 }
 
 impl Default for FrontendOptions {
@@ -68,6 +69,7 @@ impl Default for FrontendOptions {
             datanode: DatanodeOptions::default(),
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
+            tracing: TracingOptions::default(),
         }
     }
 }
