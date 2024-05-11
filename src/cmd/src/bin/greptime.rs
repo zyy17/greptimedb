@@ -55,25 +55,25 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, global_options: &GlobalOptions) -> Result<Box<dyn App>> {
+    async fn build_app(&self, global_options: &GlobalOptions) -> Result<Box<dyn App>> {
         match self {
             SubCommand::Datanode(cmd) => cmd
-                .build(cmd.load_options(global_options)?)
+                .build_instance(cmd.load_options(global_options)?)
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Frontend(cmd) => cmd
-                .build(cmd.load_options(global_options)?)
+                .build_instance(cmd.build_options(global_options)?)
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Metasrv(cmd) => cmd
-                .build(cmd.load_options(global_options)?)
+                .build_instance(cmd.build_options(global_options)?)
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Standalone(cmd) => cmd
-                .build(cmd.load_options(global_options)?)
+                .build_instance(cmd.build_options(global_options)?)
                 .await
                 .map(|x| Box::new(x) as _),
-            SubCommand::Cli(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
+            SubCommand::Cli(cmd) => cmd.build_instance().await.map(|x| Box::new(x) as _),
         }
     }
 }
@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
 
 async fn start(cli: Command) -> Result<()> {
     log_versions(version!(), short_version!());
-    start_app(cli.subcmd.build(&cli.global_options).await?).await
+    start_app(cli.subcmd.build_app(&cli.global_options).await?).await
 }
 
 fn setup_human_panic() {

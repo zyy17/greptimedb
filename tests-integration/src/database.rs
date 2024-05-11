@@ -313,11 +313,11 @@ mod tests {
             &*output_dir.path().to_string_lossy(),
         ]);
         let Options::Standalone(standalone_opts) =
-            standalone.load_options(&GlobalOptions::default())?
+            standalone.build_options(&GlobalOptions::default())?
         else {
             unreachable!()
         };
-        let mut instance = standalone.build(*standalone_opts).await?;
+        let mut instance = standalone.build_instance(*standalone_opts).await?;
         instance.start().await?;
 
         let client = Client::with_urls(["127.0.0.1:4001"]);
@@ -348,7 +348,7 @@ mod tests {
             "--target",
             "create-table",
         ]);
-        let mut cli_app = cli.build().await?;
+        let mut cli_app = cli.build_instance().await?;
         cli_app.start().await?;
 
         instance.stop().await?;

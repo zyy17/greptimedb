@@ -82,7 +82,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
+    pub async fn build_instance(&self, opts: DatanodeOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
