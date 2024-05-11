@@ -32,7 +32,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
 
 pub struct Instance {
@@ -82,11 +82,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -97,13 +97,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -135,18 +135,16 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Datanode(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                DatanodeOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .map_err(Box::new)
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
+        Ok(self.merge_with_cli_options(
+            global_options,
+            DatanodeOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .map_err(Box::new)
+            .context(LoadLayeredConfigSnafu)?,
+        )?)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -227,7 +225,14 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: DatanodeOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-datanode",
+            &opts.logging,
+            &opts.tracing,
+            opts.node_id.map(|x| x.to_string()),
+        );
+
         let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
             .context(StartDatanodeSnafu)?;

@@ -63,7 +63,7 @@ use crate::error::{
     ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
 
 #[derive(Parser)]
@@ -73,11 +73,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -88,13 +88,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -282,18 +282,16 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Standalone(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                StandaloneOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .map_err(Box::new)
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
+        Ok(self.merge_with_cli_options(
+            global_options,
+            StandaloneOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .map_err(Box::new)
+            .context(LoadLayeredConfigSnafu)?,
+        )?)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -369,7 +367,14 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(self, opts: StandaloneOptions) -> Result<Instance> {
+    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-standalone",
+            &opts.logging,
+            &opts.tracing,
+            None,
+        );
+
         info!("Standalone start command: {:#?}", self);
         info!("Building standalone instance with {opts:#?}");
 
