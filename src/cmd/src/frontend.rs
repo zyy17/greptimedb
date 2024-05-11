@@ -44,7 +44,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
-use crate::options::{GlobalOptions, Options};
+use crate::options::GlobalOptions;
 use crate::App;
 
 pub struct Instance {
@@ -94,11 +94,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         self.subcmd.load_options(global_options)
     }
 }
@@ -109,13 +109,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
@@ -155,17 +155,15 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<Options> {
-        Ok(Options::Frontend(Box::new(
-            self.merge_with_cli_options(
-                global_options,
-                FrontendOptions::load_layered_options(
-                    self.config_file.as_deref(),
-                    self.env_prefix.as_ref(),
-                )
-                .context(LoadLayeredConfigSnafu)?,
-            )?,
-        )))
+    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+        Ok(self.merge_with_cli_options(
+            global_options,
+            FrontendOptions::load_layered_options(
+                self.config_file.as_deref(),
+                self.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )?)
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -238,7 +236,14 @@ impl StartCommand {
         Ok(opts)
     }
 
-    async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+    async fn build(&self, mut opts: FrontendOptions) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-frontend",
+            &opts.logging,
+            &opts.tracing,
+            opts.node_id.clone(),
+        );
+
         #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
@@ -370,8 +375,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
+        let opts = command.load_options(&GlobalOptions::default()).unwrap() else {
             unreachable!()
         };
 
@@ -421,8 +425,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(&GlobalOptions::default()).unwrap()
-        else {
+        let fe_opts = command.load_options(&GlobalOptions::default()).unwrap() else {
             unreachable!()
         };
         assert_eq!(Mode::Distributed, fe_opts.mode);
@@ -477,9 +480,8 @@ mod tests {
             })
             .unwrap();
 
-        let logging_opt = options.logging_options();
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
+        assert_eq!("debug", options.logging.level.as_ref().unwrap());
     }
 
     #[test]
@@ -553,9 +555,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Frontend(fe_opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
+                let fe_opts = command.load_options(&GlobalOptions::default()).unwrap() else {
                     unreachable!()
                 };
 
