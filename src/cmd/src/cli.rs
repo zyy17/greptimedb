@@ -76,11 +76,11 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self) -> Result<Instance> {
+    pub async fn build_instance(&self) -> Result<Instance> {
         self.cmd.build().await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<LoggingOptions> {
+    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<LoggingOptions> {
         let mut logging_opts = LoggingOptions::default();
 
         if let Some(dir) = &global_options.log_dir {

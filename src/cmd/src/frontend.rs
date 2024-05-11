@@ -90,12 +90,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build_instance(&self, opts: FrontendOptions) -> Result<Instance> {
+        self.subcmd.build_instance(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
-        self.subcmd.load_options(global_options)
+    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+        self.subcmd.build_options(global_options)
     }
 }
 
@@ -105,13 +105,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build_instance(&self, opts: FrontendOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
+    fn build_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }

@@ -66,12 +66,12 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build_instance(&self, opts: MetasrvOptions) -> Result<Instance> {
+        self.subcmd.build_instance(opts).await
     }
 
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
-        self.subcmd.load_options(global_options)
+    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
+        self.subcmd.build_options(global_options)
     }
 }
 
@@ -81,13 +81,13 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
+    async fn build_instance(&self, opts: MetasrvOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
     }
 
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
+    fn build_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
         }
