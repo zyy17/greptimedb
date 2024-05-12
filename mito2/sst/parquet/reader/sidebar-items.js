@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ReaderState"],"struct":["Metrics","ParquetReader","ParquetReaderBuilder","RowGroupReader","RowGroupReaderBuilder","SimpleFilterContext"],"type":["RowGroupMap"]};

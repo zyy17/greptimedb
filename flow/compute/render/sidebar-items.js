@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["map","reduce"],"struct":["Context","SubgraphArg"]};

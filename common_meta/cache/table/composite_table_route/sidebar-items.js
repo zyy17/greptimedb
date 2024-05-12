@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompositeTableRoute"],"fn":["filter","init_factory","invalidator","new_composite_table_route_cache"],"type":["CompositeTableRouteCache","CompositeTableRouteCacheRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["not_impl_err","plan_err"],"mod":["aggr","expr","literal","plan"],"struct":["DataflowContext","FunctionExtensions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["composite_table_route","table_info","table_name","table_route"]};

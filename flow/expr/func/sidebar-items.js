@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BinaryFunc","UnaryFunc","UnmaterializableFunc","VariadicFunc"],"fn":["add","and","div","mul","or","rem","sub"],"macro":["generate_binary_signature"],"static":["SPECIALIZATION"],"struct":["BinaryFuncIter"]};
