@@ -53,10 +53,12 @@ impl Instance {
     }
 }
 
+pub const APP_NAME: &str = "greptime-datanode";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-datanode"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {

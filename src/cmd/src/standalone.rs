@@ -77,10 +77,12 @@ pub struct Instance {
     wal_options_allocator: WalOptionsAllocatorRef,
 }
 
+pub const APP_NAME: &str = "greptime-standalone";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-standalone"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
