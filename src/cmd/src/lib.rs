@@ -42,25 +42,25 @@ pub trait App: Send {
     async fn start(&mut self) -> error::Result<()>;
 
     async fn stop(&self) -> error::Result<()>;
-}
 
-pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
-    info!("Starting app: {}", app.name());
+    async fn run(&mut self) -> error::Result<()> {
+        info!("Starting app: {}", self.name());
 
-    app.pre_start().await?;
+        self.pre_start().await?;
 
-    app.start().await?;
+        self.start().await?;
 
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        error!("Failed to listen for ctrl-c signal: {}", e);
-        // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
-        // the underlying system. So we stop the app instead of running nonetheless to let people
-        // investigate the issue.
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for ctrl-c signal: {}", e);
+            // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
+            // the underlying system. So we stop the app instead of running nonetheless to let people
+            // investigate the issue.
+        }
+
+        self.stop().await?;
+        info!("Goodbye!");
+        Ok(())
     }
-
-    app.stop().await?;
-    info!("Goodbye!");
-    Ok(())
 }
 
 /// Log the versions of the application, and the arguments passed to the cli.
