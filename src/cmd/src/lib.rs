@@ -17,6 +17,8 @@
 use async_trait::async_trait;
 use common_telemetry::{error, info};
 
+use crate::error::Result;
+
 pub mod cli;
 pub mod datanode;
 pub mod error;
@@ -35,15 +37,15 @@ pub trait App: Send {
     fn name(&self) -> &str;
 
     /// A hook for implementor to make something happened before actual startup. Defaults to no-op.
-    async fn pre_start(&mut self) -> error::Result<()> {
+    async fn pre_start(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn start(&mut self) -> error::Result<()>;
+    async fn start(&mut self) -> Result<()>;
 
-    async fn stop(&self) -> error::Result<()>;
+    async fn stop(&self) -> Result<()>;
 
-    async fn run(&mut self) -> error::Result<()> {
+    async fn run(&mut self) -> Result<()> {
         info!("Starting app: {}", self.name());
 
         self.pre_start().await?;

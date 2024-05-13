@@ -300,7 +300,7 @@ impl StandaloneCommandBuilder {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    pub async fn build_instance(self) -> Result<Instance> {
+    pub async fn build_app(self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-standalone",
             &self.standalone_options.logging,
@@ -425,12 +425,12 @@ impl StandaloneCommandBuilder {
             .build_servers(fe_opts, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance {
+        Ok(Box::new(Instance {
             datanode,
             frontend,
             procedure_manager,
             wal_options_allocator,
-        })
+        }))
     }
 
     pub fn get_options(&self) -> StandaloneOptions {

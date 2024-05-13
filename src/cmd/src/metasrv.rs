@@ -139,7 +139,7 @@ impl MetasrvCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-metasrv",
             &self.metasrv_options.logging,
@@ -164,7 +164,7 @@ impl MetasrvCommandBuilder {
             .await
             .context(error::BuildMetaServerSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Box::new(Instance::new(instance)))
     }
 
     pub fn get_options(&self) -> MetasrvOptions {

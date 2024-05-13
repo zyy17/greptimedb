@@ -146,7 +146,7 @@ impl DatanodeCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-datanode",
             &self.datanode_options.logging,
@@ -197,7 +197,7 @@ impl DatanodeCommandBuilder {
             .context(StartDatanodeSnafu)?;
         datanode.setup_services(services);
 
-        Ok(Instance::new(datanode))
+        Ok(Box::new(Instance::new(datanode)))
     }
 
     pub fn get_options(&self) -> DatanodeOptions {

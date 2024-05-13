@@ -166,7 +166,7 @@ impl FrontendCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-frontend",
             &self.frontend_options.logging,
@@ -284,7 +284,7 @@ impl FrontendCommandBuilder {
             .build_servers(self.frontend_options, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Box::new(Instance::new(instance)))
     }
 
     pub fn get_options(&self) -> FrontendOptions {
