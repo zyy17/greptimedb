@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, start_app, App};
+use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, App};
 use common_version::{short_version, version};
 
 #[derive(Parser)]
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
 
 async fn start(cli: Command) -> Result<()> {
     log_versions(version!(), short_version!());
-    start_app(cli.subcmd.build_app(&cli.global_options).await?).await
+    cli.subcmd.build_app(&cli.global_options).await?.run().await
 }
 
 fn setup_human_panic() {
