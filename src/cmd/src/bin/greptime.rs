@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, App};
+use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone};
 use common_version::{short_version, version};
 
 #[derive(Parser)]
@@ -54,43 +54,6 @@ enum SubCommand {
     Cli(cli::Command),
 }
 
-impl SubCommand {
-    async fn build_app(self, global_options: &GlobalOptions) -> Result<Box<dyn App>> {
-        match self {
-            SubCommand::Datanode(cmd) => cmd
-                .new_command_builder()
-                .build_options(global_options)?
-                .build_instance()
-                .await
-                .map(|x| Box::new(x) as _),
-            SubCommand::Frontend(cmd) => cmd
-                .new_command_builder()
-                .build_options(global_options)?
-                .build_instance()
-                .await
-                .map(|x| Box::new(x) as _),
-            SubCommand::Metasrv(cmd) => cmd
-                .new_command_builder()
-                .build_options(global_options)?
-                .build_instance()
-                .await
-                .map(|x| Box::new(x) as _),
-            SubCommand::Standalone(cmd) => cmd
-                .new_command_builder()
-                .build_options(global_options)?
-                .build_instance()
-                .await
-                .map(|x| Box::new(x) as _),
-            SubCommand::Cli(cmd) => cmd
-                .new_command_builder()
-                .build_options(global_options)?
-                .build_instance()
-                .await
-                .map(|x| Box::new(x) as _),
-        }
-    }
-}
-
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -103,7 +66,48 @@ async fn main() -> Result<()> {
 
 async fn start(cli: Command) -> Result<()> {
     log_versions(version!(), short_version!());
-    cli.subcmd.build_app(&cli.global_options).await?.run().await
+    match cli.subcmd {
+        SubCommand::Datanode(cmd) => {
+            cmd.new_command_builder()
+                .build_options(&cli.global_options)?
+                .build_app()
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Frontend(cmd) => {
+            cmd.new_command_builder()
+                .build_options(&cli.global_options)?
+                .build_app()
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Metasrv(cmd) => {
+            cmd.new_command_builder()
+                .build_options(&cli.global_options)?
+                .build_app()
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Standalone(cmd) => {
+            cmd.new_command_builder()
+                .build_options(&cli.global_options)?
+                .build_app()
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Cli(cmd) => {
+            cmd.new_command_builder()
+                .build_options(&cli.global_options)?
+                .build_app()
+                .await?
+                .run()
+                .await
+        }
+    }
 }
 
 fn setup_human_panic() {

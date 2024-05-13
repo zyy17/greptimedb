@@ -268,7 +268,7 @@ pub struct StartCommand {
 #[derive(Default)]
 pub struct StandaloneCommandBuilder {
     standalone_options: StandaloneOptions,
-    start_command: StartCommand,
+    command: StartCommand,
 }
 
 impl StandaloneCommandBuilder {
@@ -276,8 +276,8 @@ impl StandaloneCommandBuilder {
         Self::default()
     }
 
-    fn add_start_command(mut self, start_command: StartCommand) -> Self {
-        self.start_command = start_command;
+    fn add_start_command(mut self, cmd: StartCommand) -> Self {
+        self.command = cmd;
         self
     }
 
@@ -285,8 +285,8 @@ impl StandaloneCommandBuilder {
         self.standalone_options = self.merge_with_cli_options(
             global_options,
             StandaloneOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
+                self.command.config_file.as_deref(),
+                self.command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
@@ -297,7 +297,7 @@ impl StandaloneCommandBuilder {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    pub async fn build_instance(self) -> Result<Instance> {
+    pub async fn build_app(self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-standalone",
             &self.standalone_options.logging,
@@ -305,7 +305,7 @@ impl StandaloneCommandBuilder {
             None,
         );
 
-        info!("Standalone start command: {:#?}", self.start_command);
+        info!("Standalone start command: {:#?}", self.command);
         info!("Standalone options: {:#?}", self.standalone_options);
 
         let mut fe_opts = self.standalone_options.frontend_options();
@@ -403,12 +403,12 @@ impl StandaloneCommandBuilder {
             .build_servers(fe_opts, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance {
+        Ok(Box::new(Instance {
             datanode,
             frontend,
             procedure_manager,
             wal_options_allocator,
-        })
+        }))
     }
 
     pub fn get_options(&self) -> StandaloneOptions {
@@ -438,20 +438,20 @@ impl StandaloneCommandBuilder {
         };
 
         let tls_opts = TlsOption::new(
-            self.start_command.tls_mode.clone(),
-            self.start_command.tls_cert_path.clone(),
-            self.start_command.tls_key_path.clone(),
+            self.command.tls_mode.clone(),
+            self.command.tls_cert_path.clone(),
+            self.command.tls_key_path.clone(),
         );
 
-        if let Some(addr) = &self.start_command.http_addr {
+        if let Some(addr) = &self.command.http_addr {
             opts.http.addr.clone_from(addr);
         }
 
-        if let Some(data_home) = &self.start_command.data_home {
+        if let Some(data_home) = &self.command.data_home {
             opts.storage.data_home.clone_from(data_home);
         }
 
-        if let Some(addr) = &self.start_command.rpc_addr {
+        if let Some(addr) = &self.command.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
             if addr.eq(&datanode_grpc_addr) {
@@ -464,24 +464,23 @@ impl StandaloneCommandBuilder {
             opts.grpc.addr.clone_from(addr)
         }
 
-        if let Some(addr) = &self.start_command.mysql_addr {
+        if let Some(addr) = &self.command.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
             opts.mysql.tls = tls_opts.clone();
         }
 
-        if let Some(addr) = &self.start_command.postgres_addr {
+        if let Some(addr) = &self.command.postgres_addr {
             opts.postgres.enable = true;
             opts.postgres.addr.clone_from(addr);
             opts.postgres.tls = tls_opts;
         }
 
-        if self.start_command.influxdb_enable {
-            opts.influxdb.enable = self.start_command.influxdb_enable;
+        if self.command.influxdb_enable {
+            opts.influxdb.enable = self.command.influxdb_enable;
         }
 
-        opts.user_provider
-            .clone_from(&self.start_command.user_provider);
+        opts.user_provider.clone_from(&self.command.user_provider);
 
         Ok(opts)
     }

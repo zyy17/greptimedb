@@ -68,7 +68,7 @@ pub struct Command {
 impl Command {
     pub fn new_command_builder(self) -> MetasrvCommandBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => MetasrvCommandBuilder::new().add_start_command(cmd),
+            SubCommand::Start(cmd) => MetasrvCommandBuilder::new().add_command(cmd),
         }
     }
 }
@@ -114,7 +114,7 @@ struct StartCommand {
 #[derive(Default)]
 pub struct MetasrvCommandBuilder {
     metasrv_options: MetasrvOptions,
-    start_command: StartCommand,
+    command: StartCommand,
 }
 
 impl MetasrvCommandBuilder {
@@ -122,8 +122,8 @@ impl MetasrvCommandBuilder {
         Self::default()
     }
 
-    fn add_start_command(mut self, cmd: StartCommand) -> Self {
-        self.start_command = cmd;
+    fn add_command(mut self, cmd: StartCommand) -> Self {
+        self.command = cmd;
         self
     }
 
@@ -131,8 +131,8 @@ impl MetasrvCommandBuilder {
         self.metasrv_options = self.merge_with_cli_options(
             global_options,
             MetasrvOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
+                self.command.config_file.as_deref(),
+                self.command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
@@ -140,7 +140,7 @@ impl MetasrvCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-metasrv",
             &self.metasrv_options.logging,
@@ -152,7 +152,7 @@ impl MetasrvCommandBuilder {
             .await
             .context(StartMetaServerSnafu)?;
 
-        info!("Metasrv start command: {:#?}", self.start_command);
+        info!("Metasrv start command: {:#?}", self.command);
         info!("Metasrv options: {:#?}", self.metasrv_options);
 
         let builder =
@@ -165,7 +165,7 @@ impl MetasrvCommandBuilder {
             .await
             .context(error::BuildMetaServerSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Box::new(Instance::new(instance)))
     }
 
     pub fn get_options(&self) -> MetasrvOptions {
@@ -191,50 +191,50 @@ impl MetasrvCommandBuilder {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.start_command.bind_addr {
+        if let Some(addr) = &self.command.bind_addr {
             opts.bind_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.start_command.server_addr {
+        if let Some(addr) = &self.command.server_addr {
             opts.server_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.start_command.store_addr {
+        if let Some(addr) = &self.command.store_addr {
             opts.store_addr.clone_from(addr);
         }
 
-        if let Some(selector_type) = &self.start_command.selector {
+        if let Some(selector_type) = &self.command.selector {
             opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
         }
 
-        if let Some(use_memory_store) = self.start_command.use_memory_store {
+        if let Some(use_memory_store) = self.command.use_memory_store {
             opts.use_memory_store = use_memory_store;
         }
 
-        if let Some(enable_region_failover) = self.start_command.enable_region_failover {
+        if let Some(enable_region_failover) = self.command.enable_region_failover {
             opts.enable_region_failover = enable_region_failover;
         }
 
-        if let Some(http_addr) = &self.start_command.http_addr {
+        if let Some(http_addr) = &self.command.http_addr {
             opts.http.addr.clone_from(http_addr);
         }
 
-        if let Some(http_timeout) = self.start_command.http_timeout {
+        if let Some(http_timeout) = self.command.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
-        if let Some(data_home) = &self.start_command.data_home {
+        if let Some(data_home) = &self.command.data_home {
             opts.data_home.clone_from(data_home);
         }
 
-        if !self.start_command.store_key_prefix.is_empty() {
+        if !self.command.store_key_prefix.is_empty() {
             opts.store_key_prefix
-                .clone_from(&self.start_command.store_key_prefix)
+                .clone_from(&self.command.store_key_prefix)
         }
 
-        if let Some(max_txn_ops) = self.start_command.max_txn_ops {
+        if let Some(max_txn_ops) = self.command.max_txn_ops {
             opts.max_txn_ops = max_txn_ops;
         }
 

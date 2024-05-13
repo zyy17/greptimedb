@@ -89,7 +89,7 @@ enum SubCommand {
 impl Command {
     pub fn new_command_builder(self) -> DatanodeCommandBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => DatanodeCommandBuilder::new().add_start_command(cmd),
+            SubCommand::Start(cmd) => DatanodeCommandBuilder::new().add_command(cmd),
         }
     }
 }
@@ -121,7 +121,7 @@ struct StartCommand {
 #[derive(Default)]
 pub struct DatanodeCommandBuilder {
     datanode_options: DatanodeOptions,
-    start_command: StartCommand,
+    command: StartCommand,
 }
 
 impl DatanodeCommandBuilder {
@@ -129,8 +129,8 @@ impl DatanodeCommandBuilder {
         Self::default()
     }
 
-    fn add_start_command(mut self, cmd: StartCommand) -> Self {
-        self.start_command = cmd;
+    fn add_command(mut self, cmd: StartCommand) -> Self {
+        self.command = cmd;
         self
     }
 
@@ -138,8 +138,8 @@ impl DatanodeCommandBuilder {
         self.datanode_options = self.merge_with_cli_options(
             global_options,
             DatanodeOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
+                self.command.config_file.as_deref(),
+                self.command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
@@ -147,7 +147,7 @@ impl DatanodeCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-datanode",
             &self.datanode_options.logging,
@@ -159,7 +159,7 @@ impl DatanodeCommandBuilder {
             .await
             .context(StartDatanodeSnafu)?;
 
-        info!("Datanode start command: {:#?}", self.start_command);
+        info!("Datanode start command: {:#?}", self.command);
         info!("Datanode options: {:#?}", self.datanode_options);
 
         let node_id = self
@@ -198,7 +198,7 @@ impl DatanodeCommandBuilder {
             .context(StartDatanodeSnafu)?;
         datanode.setup_services(services);
 
-        Ok(Instance::new(datanode))
+        Ok(Box::new(Instance::new(datanode)))
     }
 
     pub fn get_options(&self) -> DatanodeOptions {
@@ -224,20 +224,19 @@ impl DatanodeCommandBuilder {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.start_command.rpc_addr {
+        if let Some(addr) = &self.command.rpc_addr {
             opts.rpc_addr.clone_from(addr);
         }
 
-        if self.start_command.rpc_hostname.is_some() {
-            opts.rpc_hostname
-                .clone_from(&self.start_command.rpc_hostname);
+        if self.command.rpc_hostname.is_some() {
+            opts.rpc_hostname.clone_from(&self.command.rpc_hostname);
         }
 
-        if let Some(node_id) = self.start_command.node_id {
+        if let Some(node_id) = self.command.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(metasrv_addrs) = &self.start_command.metasrv_addrs {
+        if let Some(metasrv_addrs) = &self.command.metasrv_addrs {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
@@ -252,12 +251,12 @@ impl DatanodeCommandBuilder {
             .fail();
         }
 
-        if let Some(data_home) = &self.start_command.data_home {
+        if let Some(data_home) = &self.command.data_home {
             opts.storage.data_home.clone_from(data_home);
         }
 
         // `wal_dir` only affects raft-engine config.
-        if let Some(wal_dir) = &self.start_command.wal_dir
+        if let Some(wal_dir) = &self.command.wal_dir
             && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
         {
             if raft_engine_config
@@ -270,11 +269,11 @@ impl DatanodeCommandBuilder {
             raft_engine_config.dir.replace(wal_dir.clone());
         }
 
-        if let Some(http_addr) = &self.start_command.http_addr {
+        if let Some(http_addr) = &self.command.http_addr {
             opts.http.addr.clone_from(http_addr);
         }
 
-        if let Some(http_timeout) = self.start_command.http_timeout {
+        if let Some(http_timeout) = self.command.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout)
         }
 

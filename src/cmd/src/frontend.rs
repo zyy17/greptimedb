@@ -92,7 +92,7 @@ pub struct Command {
 impl Command {
     pub fn new_command_builder(self) -> FrontendCommandBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => FrontendCommandBuilder::new().add_start_command(cmd),
+            SubCommand::Start(cmd) => FrontendCommandBuilder::new().add_command(cmd),
         }
     }
 }
@@ -137,7 +137,7 @@ pub struct StartCommand {
 #[derive(Default)]
 pub struct FrontendCommandBuilder {
     frontend_options: FrontendOptions,
-    start_command: StartCommand,
+    command: StartCommand,
 }
 
 impl FrontendCommandBuilder {
@@ -145,8 +145,8 @@ impl FrontendCommandBuilder {
         Self::default()
     }
 
-    fn add_start_command(mut self, cmd: StartCommand) -> Self {
-        self.start_command = cmd;
+    fn add_command(mut self, cmd: StartCommand) -> Self {
+        self.command = cmd;
         self
     }
 
@@ -154,8 +154,8 @@ impl FrontendCommandBuilder {
         self.frontend_options = self.merge_with_cli_options(
             global_options,
             FrontendOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
+                self.command.config_file.as_deref(),
+                self.command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
@@ -163,7 +163,7 @@ impl FrontendCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(mut self) -> Result<Instance> {
+    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-frontend",
             &self.frontend_options.logging,
@@ -176,7 +176,7 @@ impl FrontendCommandBuilder {
             .await
             .context(StartFrontendSnafu)?;
 
-        info!("Frontend start command: {:#?}", self.start_command);
+        info!("Frontend start command: {:#?}", self.command);
         info!("Frontend options: {:#?}", self.frontend_options);
 
         set_default_timezone(self.frontend_options.default_timezone.as_deref())
@@ -260,7 +260,7 @@ impl FrontendCommandBuilder {
             .build_servers(self.frontend_options, servers)
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance::new(instance))
+        Ok(Box::new(Instance::new(instance)))
     }
 
     pub fn get_options(&self) -> FrontendOptions {
@@ -287,44 +287,44 @@ impl FrontendCommandBuilder {
         };
 
         let tls_opts = TlsOption::new(
-            self.start_command.tls_mode.clone(),
-            self.start_command.tls_cert_path.clone(),
-            self.start_command.tls_key_path.clone(),
+            self.command.tls_mode.clone(),
+            self.command.tls_cert_path.clone(),
+            self.command.tls_key_path.clone(),
         );
 
-        if let Some(addr) = &self.start_command.http_addr {
+        if let Some(addr) = &self.command.http_addr {
             opts.http.addr.clone_from(addr);
         }
 
-        if let Some(http_timeout) = self.start_command.http_timeout {
+        if let Some(http_timeout) = self.command.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout)
         }
 
-        if let Some(disable_dashboard) = self.start_command.disable_dashboard {
+        if let Some(disable_dashboard) = self.command.disable_dashboard {
             opts.http.disable_dashboard = disable_dashboard;
         }
 
-        if let Some(addr) = &self.start_command.rpc_addr {
+        if let Some(addr) = &self.command.rpc_addr {
             opts.grpc.addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.start_command.mysql_addr {
+        if let Some(addr) = &self.command.mysql_addr {
             opts.mysql.enable = true;
             opts.mysql.addr.clone_from(addr);
             opts.mysql.tls = tls_opts.clone();
         }
 
-        if let Some(addr) = &self.start_command.postgres_addr {
+        if let Some(addr) = &self.command.postgres_addr {
             opts.postgres.enable = true;
             opts.postgres.addr.clone_from(addr);
             opts.postgres.tls = tls_opts;
         }
 
-        if let Some(enable) = self.start_command.influxdb_enable {
+        if let Some(enable) = self.command.influxdb_enable {
             opts.influxdb.enable = enable;
         }
 
-        if let Some(metasrv_addrs) = &self.start_command.metasrv_addrs {
+        if let Some(metasrv_addrs) = &self.command.metasrv_addrs {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
@@ -332,8 +332,7 @@ impl FrontendCommandBuilder {
             opts.mode = Mode::Distributed;
         }
 
-        opts.user_provider
-            .clone_from(&self.start_command.user_provider);
+        opts.user_provider.clone_from(&self.command.user_provider);
 
         Ok(opts)
     }

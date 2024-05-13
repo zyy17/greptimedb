@@ -108,19 +108,19 @@ impl AttachCommand {
 #[derive(Default)]
 pub struct CliCommandBuilder {
     logging_options: LoggingOptions,
-    subcmd: Option<SubCommand>,
+    command: Option<SubCommand>,
 }
 
 impl CliCommandBuilder {
     fn new() -> Self {
         CliCommandBuilder {
             logging_options: LoggingOptions::default(),
-            subcmd: None,
+            command: None,
         }
     }
 
     fn add_command(mut self, cmd: SubCommand) -> Self {
-        self.subcmd = Some(cmd);
+        self.command = Some(cmd);
         self
     }
 
@@ -138,12 +138,12 @@ impl CliCommandBuilder {
         Ok(self)
     }
 
-    pub async fn build_instance(self) -> Result<Instance> {
-        if let Some(subcmd) = self.subcmd {
+    pub async fn build_app(self) -> Result<Box<dyn App>> {
+        if let Some(subcmd) = self.command {
             match subcmd {
-                SubCommand::Upgrade(cmd) => cmd.build().await,
-                SubCommand::Bench(cmd) => cmd.build().await,
-                SubCommand::Export(cmd) => cmd.build().await,
+                SubCommand::Upgrade(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
+                SubCommand::Bench(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
+                SubCommand::Export(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
             }
         } else {
             // This should never happen because clap should catch this.
