@@ -61,10 +61,12 @@ impl Instance {
     }
 }
 
+pub const APP_NAME: &str = "greptime-frontend";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-frontend"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -171,7 +173,7 @@ impl FrontendCommandBuilder {
     pub async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(mut options) = self.frontend_options {
             let _guard = common_telemetry::init_global_logging(
-                "greptime-frontend",
+                APP_NAME,
                 &options.logging,
                 &options.tracing,
                 options.node_id.clone(),

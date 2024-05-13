@@ -73,10 +73,12 @@ pub struct Instance {
     wal_options_allocator: WalOptionsAllocatorRef,
 }
 
+pub const APP_NAME: &str = "greptime-standalone";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-standalone"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -305,7 +307,7 @@ impl StandaloneCommandBuilder {
     pub async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(options) = self.standalone_options {
             let _guard = common_telemetry::init_global_logging(
-                "greptime-standalone",
+                APP_NAME,
                 &options.logging,
                 &options.tracing,
                 None,

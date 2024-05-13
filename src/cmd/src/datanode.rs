@@ -53,10 +53,12 @@ impl Instance {
     }
 }
 
+pub const APP_NAME: &str = "greptime-datanode";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-datanode"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -155,7 +157,7 @@ impl DatanodeCommandBuilder {
     pub async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(mut options) = self.datanode_options {
             let _guard = common_telemetry::init_global_logging(
-                "greptime-datanode",
+                APP_NAME,
                 &options.logging,
                 &options.tracing,
                 options.node_id.map(|x| x.to_string()),

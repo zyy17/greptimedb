@@ -54,10 +54,12 @@ impl Instance {
     }
 }
 
+pub const APP_NAME: &str = "greptime-cli";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-cli"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {

@@ -39,10 +39,12 @@ impl Instance {
     }
 }
 
+pub const APP_NAME: &str = "greptime-metasrv";
+
 #[async_trait]
 impl App for Instance {
     fn name(&self) -> &str {
-        "greptime-metasrv"
+        APP_NAME
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -150,7 +152,7 @@ impl MetasrvCommandBuilder {
     pub async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(mut options) = self.metasrv_options {
             let _guard = common_telemetry::init_global_logging(
-                "greptime-metasrv",
+                APP_NAME,
                 &options.logging,
                 &options.tracing,
                 None,
