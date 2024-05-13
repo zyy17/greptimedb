@@ -72,47 +72,23 @@ impl App for Instance {
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    cmd: SubCommand,
+    subcmd: SubCommand,
 }
 
 impl Command {
-    pub async fn build_instance(&self) -> Result<Instance> {
-        self.cmd.build().await
-    }
-
-    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<LoggingOptions> {
-        let mut logging_opts = LoggingOptions::default();
-
-        if let Some(dir) = &global_options.log_dir {
-            logging_opts.dir.clone_from(dir);
-        }
-
-        logging_opts.level.clone_from(&global_options.log_level);
-
-        Ok(logging_opts)
+    pub fn new_command_builder(self) -> CliCommandBuilder {
+        CliCommandBuilder::new().add_command(self.subcmd)
     }
 }
 
 #[derive(Parser)]
 enum SubCommand {
-    // Attach(AttachCommand),
     Upgrade(UpgradeCommand),
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
 }
 
-impl SubCommand {
-    async fn build(&self) -> Result<Instance> {
-        match self {
-            // SubCommand::Attach(cmd) => cmd.build().await,
-            SubCommand::Upgrade(cmd) => cmd.build().await,
-            SubCommand::Bench(cmd) => cmd.build().await,
-            SubCommand::Export(cmd) => cmd.build().await,
-        }
-    }
-}
-
-#[derive(Debug, Parser)]
+#[derive(Default, Debug, Parser)]
 pub(crate) struct AttachCommand {
     #[clap(long)]
     pub(crate) grpc_addr: String,
@@ -126,5 +102,52 @@ impl AttachCommand {
     #[allow(dead_code)]
     async fn build(self) -> Result<Instance> {
         unimplemented!("Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373")
+    }
+}
+
+#[derive(Default)]
+pub struct CliCommandBuilder {
+    logging_options: LoggingOptions,
+    subcmd: Option<SubCommand>,
+}
+
+impl CliCommandBuilder {
+    fn new() -> Self {
+        CliCommandBuilder {
+            logging_options: LoggingOptions::default(),
+            subcmd: None,
+        }
+    }
+
+    fn add_command(mut self, cmd: SubCommand) -> Self {
+        self.subcmd = Some(cmd);
+        self
+    }
+
+    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+        let mut logging_opts = LoggingOptions::default();
+
+        if let Some(dir) = &global_options.log_dir {
+            logging_opts.dir.clone_from(dir);
+        }
+
+        logging_opts.level.clone_from(&global_options.log_level);
+
+        self.logging_options = logging_opts;
+
+        Ok(self)
+    }
+
+    pub async fn build_instance(self) -> Result<Instance> {
+        if let Some(subcmd) = self.subcmd {
+            match subcmd {
+                SubCommand::Upgrade(cmd) => cmd.build().await,
+                SubCommand::Bench(cmd) => cmd.build().await,
+                SubCommand::Export(cmd) => cmd.build().await,
+            }
+        } else {
+            // This should never happen because clap should catch this.
+            unreachable!("Subcommand is not set");
+        }
     }
 }

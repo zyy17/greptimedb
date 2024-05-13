@@ -70,6 +70,61 @@ use crate::error::{
 use crate::options::GlobalOptions;
 use crate::App;
 
+pub struct Instance {
+    datanode: Datanode,
+    frontend: FeInstance,
+    procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-standalone"
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        self.datanode.start_telemetry();
+
+        self.procedure_manager
+            .start()
+            .await
+            .context(StartProcedureManagerSnafu)?;
+
+        self.wal_options_allocator
+            .start()
+            .await
+            .context(StartWalOptionsAllocatorSnafu)?;
+
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
+            .await
+            .context(StartFrontendSnafu)?;
+
+        self.frontend.start().await.context(StartFrontendSnafu)?;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.frontend
+            .shutdown()
+            .await
+            .context(ShutdownFrontendSnafu)?;
+
+        self.procedure_manager
+            .stop()
+            .await
+            .context(StopProcedureManagerSnafu)?;
+
+        self.datanode
+            .shutdown()
+            .await
+            .context(ShutdownDatanodeSnafu)?;
+        info!("Datanode instance stopped.");
+
+        Ok(())
+    }
+}
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -77,32 +132,16 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build_instance(&self, opts: StandaloneOptions) -> Result<Instance> {
-        self.subcmd.build_instance(opts).await
-    }
-
-    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
-        self.subcmd.build_options(global_options)
+    pub fn new_command_builder(self) -> StandaloneCommandBuilder {
+        match self.subcmd {
+            SubCommand::Start(cmd) => StandaloneCommandBuilder::new().add_start_command(cmd),
+        }
     }
 }
 
 #[derive(Parser)]
 enum SubCommand {
     Start(StartCommand),
-}
-
-impl SubCommand {
-    async fn build_instance(&self, opts: StandaloneOptions) -> Result<Instance> {
-        match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
-        }
-    }
-
-    fn build_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
-        match self {
-            SubCommand::Start(cmd) => cmd.load_options(global_options),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,61 +240,6 @@ impl StandaloneOptions {
     }
 }
 
-pub struct Instance {
-    datanode: Datanode,
-    frontend: FeInstance,
-    procedure_manager: ProcedureManagerRef,
-    wal_options_allocator: WalOptionsAllocatorRef,
-}
-
-#[async_trait]
-impl App for Instance {
-    fn name(&self) -> &str {
-        "greptime-standalone"
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        self.datanode.start_telemetry();
-
-        self.procedure_manager
-            .start()
-            .await
-            .context(StartProcedureManagerSnafu)?;
-
-        self.wal_options_allocator
-            .start()
-            .await
-            .context(StartWalOptionsAllocatorSnafu)?;
-
-        plugins::start_frontend_plugins(self.frontend.plugins().clone())
-            .await
-            .context(StartFrontendSnafu)?;
-
-        self.frontend.start().await.context(StartFrontendSnafu)?;
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<()> {
-        self.frontend
-            .shutdown()
-            .await
-            .context(ShutdownFrontendSnafu)?;
-
-        self.procedure_manager
-            .stop()
-            .await
-            .context(StopProcedureManagerSnafu)?;
-
-        self.datanode
-            .shutdown()
-            .await
-            .context(ShutdownDatanodeSnafu)?;
-        info!("Datanode instance stopped.");
-
-        Ok(())
-    }
-}
-
 #[derive(Debug, Default, Parser)]
 pub struct StartCommand {
     #[clap(long)]
@@ -285,109 +269,55 @@ pub struct StartCommand {
     data_home: Option<String>,
 }
 
-impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<StandaloneOptions> {
-        Ok(self.merge_with_cli_options(
-            global_options,
-            StandaloneOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
-        )?)
+#[derive(Default)]
+pub struct StandaloneCommandBuilder {
+    standalone_options: StandaloneOptions,
+    start_command: StartCommand,
+}
+
+impl StandaloneCommandBuilder {
+    fn new() -> Self {
+        Self::default()
     }
 
-    // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
-        &self,
-        global_options: &GlobalOptions,
-        mut opts: StandaloneOptions,
-    ) -> Result<StandaloneOptions> {
-        // Should always be standalone mode.
-        opts.mode = Mode::Standalone;
+    fn add_start_command(mut self, start_command: StartCommand) -> Self {
+        self.start_command = start_command;
+        self
+    }
 
-        if let Some(dir) = &global_options.log_dir {
-            opts.logging.dir.clone_from(dir);
-        }
-
-        if global_options.log_level.is_some() {
-            opts.logging.level.clone_from(&global_options.log_level);
-        }
-
-        opts.tracing = TracingOptions {
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: global_options.tokio_console_addr.clone(),
-        };
-
-        let tls_opts = TlsOption::new(
-            self.tls_mode.clone(),
-            self.tls_cert_path.clone(),
-            self.tls_key_path.clone(),
-        );
-
-        if let Some(addr) = &self.http_addr {
-            opts.http.addr.clone_from(addr);
-        }
-
-        if let Some(data_home) = &self.data_home {
-            opts.storage.data_home.clone_from(data_home);
-        }
-
-        if let Some(addr) = &self.rpc_addr {
-            // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
-            if addr.eq(&datanode_grpc_addr) {
-                return IllegalConfigSnafu {
-                    msg: format!(
-                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
-                    ),
-                }.fail();
-            }
-            opts.grpc.addr.clone_from(addr)
-        }
-
-        if let Some(addr) = &self.mysql_addr {
-            opts.mysql.enable = true;
-            opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
-        }
-
-        if let Some(addr) = &self.postgres_addr {
-            opts.postgres.enable = true;
-            opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
-        }
-
-        if self.influxdb_enable {
-            opts.influxdb.enable = self.influxdb_enable;
-        }
-
-        opts.user_provider.clone_from(&self.user_provider);
-
-        Ok(opts)
+    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+        self.standalone_options = self.merge_with_cli_options(
+            global_options,
+            StandaloneOptions::load_layered_options(
+                self.start_command.config_file.as_deref(),
+                self.start_command.env_prefix.as_ref(),
+            )
+            .context(LoadLayeredConfigSnafu)?,
+        )?;
+        Ok(self)
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    async fn build(&self, opts: StandaloneOptions) -> Result<Instance> {
+    pub async fn build_instance(self) -> Result<Instance> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-standalone",
-            &opts.logging,
-            &opts.tracing,
+            &self.standalone_options.logging,
+            &self.standalone_options.tracing,
             None,
         );
 
-        info!("Standalone start command: {:#?}", self);
-        info!("Building standalone instance with {opts:#?}");
+        info!("Standalone start command: {:#?}", self.start_command);
+        info!("Standalone options: {:#?}", self.standalone_options);
 
-        let mut fe_opts = opts.frontend_options();
+        let mut fe_opts = self.standalone_options.frontend_options();
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode_options();
+        let dn_opts = self.standalone_options.datanode_options();
 
         set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
@@ -399,8 +329,8 @@ impl StartCommand {
         let metadata_dir = metadata_store_dir(data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
-            opts.metadata_store.clone(),
-            opts.procedure.clone(),
+            self.standalone_options.metadata_store.clone(),
+            self.standalone_options.procedure.clone(),
         )
         .await
         .context(StartFrontendSnafu)?;
@@ -450,7 +380,7 @@ impl StartCommand {
                 .build(),
         );
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            opts.wal.into(),
+            self.standalone_options.wal.into(),
             kv_backend.clone(),
         ));
         let table_metadata_manager =
@@ -501,6 +431,81 @@ impl StartCommand {
             procedure_manager,
             wal_options_allocator,
         })
+    }
+
+    pub fn get_options(&self) -> StandaloneOptions {
+        self.standalone_options.clone()
+    }
+
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<StandaloneOptions> {
+        // Should always be standalone mode.
+        opts.mode = Mode::Standalone;
+
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
+        }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        let tls_opts = TlsOption::new(
+            self.start_command.tls_mode.clone(),
+            self.start_command.tls_cert_path.clone(),
+            self.start_command.tls_key_path.clone(),
+        );
+
+        if let Some(addr) = &self.start_command.http_addr {
+            opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(data_home) = &self.start_command.data_home {
+            opts.storage.data_home.clone_from(data_home);
+        }
+
+        if let Some(addr) = &self.start_command.rpc_addr {
+            // frontend grpc addr conflict with datanode default grpc addr
+            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+            if addr.eq(&datanode_grpc_addr) {
+                return IllegalConfigSnafu {
+                    msg: format!(
+                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
+                    ),
+                }.fail();
+            }
+            opts.grpc.addr.clone_from(addr)
+        }
+
+        if let Some(addr) = &self.start_command.mysql_addr {
+            opts.mysql.enable = true;
+            opts.mysql.addr.clone_from(addr);
+            opts.mysql.tls = tls_opts.clone();
+        }
+
+        if let Some(addr) = &self.start_command.postgres_addr {
+            opts.postgres.enable = true;
+            opts.postgres.addr.clone_from(addr);
+            opts.postgres.tls = tls_opts;
+        }
+
+        if self.start_command.influxdb_enable {
+            opts.influxdb.enable = self.start_command.influxdb_enable;
+        }
+
+        opts.user_provider
+            .clone_from(&self.start_command.user_provider);
+
+        Ok(opts)
     }
 
     pub async fn create_ddl_task_executor(
@@ -562,6 +567,13 @@ mod tests {
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    fn create_options_by_cmd(cmd: Command) -> Result<StandaloneOptions> {
+        let builder = cmd
+            .new_command_builder()
+            .build_options(&GlobalOptions::default())?;
+        Ok(builder.get_options())
+    }
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -643,15 +655,16 @@ mod tests {
             dir = "/tmp/greptimedb/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
-        let cmd = StartCommand {
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            ..Default::default()
-        };
 
-        let options = cmd.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                config_file: Some(file.path().to_str().unwrap().to_string()),
+                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
         let logging_opts = options.logging;
@@ -699,13 +712,16 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand {
-            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            ..Default::default()
+        let cmd = Command {
+            subcmd: SubCommand::Start(StartCommand {
+                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                ..Default::default()
+            }),
         };
 
-        let opts = cmd
-            .load_options(&GlobalOptions {
+        let options = cmd
+            .new_command_builder()
+            .build_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
@@ -713,12 +729,10 @@ mod tests {
                 tokio_console_addr: None,
             })
             .unwrap()
-        else {
-            unreachable!()
-        };
+            .get_options();
 
-        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
-        assert_eq!("debug", opts.logging.level.unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
+        assert_eq!("debug", options.logging.level.as_ref().unwrap());
     }
 
     #[test]
@@ -770,16 +784,15 @@ mod tests {
                 ),
             ],
             || {
-                let command = StartCommand {
-                    config_file: Some(file.path().to_str().unwrap().to_string()),
-                    http_addr: Some("127.0.0.1:14000".to_string()),
-                    env_prefix: env_prefix.to_string(),
-                    ..Default::default()
-                };
-
-                let opts = command.load_options(&GlobalOptions::default()).unwrap() else {
-                    unreachable!()
-                };
+                let opts = create_options_by_cmd(Command {
+                    subcmd: SubCommand::Start(StartCommand {
+                        config_file: Some(file.path().to_str().unwrap().to_string()),
+                        http_addr: Some("127.0.0.1:14000".to_string()),
+                        env_prefix: env_prefix.to_string(),
+                        ..Default::default()
+                    }),
+                })
+                .unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.logging.dir, "/other/log/dir");

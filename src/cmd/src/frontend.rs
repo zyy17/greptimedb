@@ -94,32 +94,16 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build_instance(&self, opts: FrontendOptions) -> Result<Instance> {
-        self.subcmd.build_instance(opts).await
-    }
-
-    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
-        self.subcmd.build_options(global_options)
+    pub fn new_command_builder(self) -> FrontendCommandBuilder {
+        match self.subcmd {
+            SubCommand::Start(cmd) => FrontendCommandBuilder::new().add_start_command(cmd),
+        }
     }
 }
 
 #[derive(Parser)]
 enum SubCommand {
     Start(StartCommand),
-}
-
-impl SubCommand {
-    async fn build_instance(&self, opts: FrontendOptions) -> Result<Instance> {
-        match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
-        }
-    }
-
-    fn build_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
-        match self {
-            SubCommand::Start(cmd) => cmd.load_options(global_options),
-        }
-    }
 }
 
 #[derive(Debug, Default, Parser)]
@@ -154,109 +138,60 @@ pub struct StartCommand {
     env_prefix: String,
 }
 
-impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<FrontendOptions> {
-        Ok(self.merge_with_cli_options(
+#[derive(Default)]
+pub struct FrontendCommandBuilder {
+    frontend_options: FrontendOptions,
+    start_command: StartCommand,
+}
+
+impl FrontendCommandBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_start_command(mut self, cmd: StartCommand) -> Self {
+        self.start_command = cmd;
+        self
+    }
+
+    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+        self.frontend_options = self.merge_with_cli_options(
             global_options,
             FrontendOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
+                self.start_command.config_file.as_deref(),
+                self.start_command.env_prefix.as_ref(),
             )
             .context(LoadLayeredConfigSnafu)?,
-        )?)
+        )?;
+        Ok(self)
     }
 
-    // The precedence order is: cli > config file > environment variables > default values.
-    fn merge_with_cli_options(
-        &self,
-        global_options: &GlobalOptions,
-        mut opts: FrontendOptions,
-    ) -> Result<FrontendOptions> {
-        if let Some(dir) = &global_options.log_dir {
-            opts.logging.dir.clone_from(dir);
-        }
-
-        if global_options.log_level.is_some() {
-            opts.logging.level.clone_from(&global_options.log_level);
-        }
-
-        opts.tracing = TracingOptions {
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: global_options.tokio_console_addr.clone(),
-        };
-
-        let tls_opts = TlsOption::new(
-            self.tls_mode.clone(),
-            self.tls_cert_path.clone(),
-            self.tls_key_path.clone(),
-        );
-
-        if let Some(addr) = &self.http_addr {
-            opts.http.addr.clone_from(addr);
-        }
-
-        if let Some(http_timeout) = self.http_timeout {
-            opts.http.timeout = Duration::from_secs(http_timeout)
-        }
-
-        if let Some(disable_dashboard) = self.disable_dashboard {
-            opts.http.disable_dashboard = disable_dashboard;
-        }
-
-        if let Some(addr) = &self.rpc_addr {
-            opts.grpc.addr.clone_from(addr);
-        }
-
-        if let Some(addr) = &self.mysql_addr {
-            opts.mysql.enable = true;
-            opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
-        }
-
-        if let Some(addr) = &self.postgres_addr {
-            opts.postgres.enable = true;
-            opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
-        }
-
-        if let Some(enable) = self.influxdb_enable {
-            opts.influxdb.enable = enable;
-        }
-
-        if let Some(metasrv_addrs) = &self.metasrv_addrs {
-            opts.meta_client
-                .get_or_insert_with(MetaClientOptions::default)
-                .metasrv_addrs
-                .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
-        }
-
-        opts.user_provider.clone_from(&self.user_provider);
-
-        Ok(opts)
-    }
-
-    async fn build(&self, mut opts: FrontendOptions) -> Result<Instance> {
+    pub async fn build_instance(mut self) -> Result<Instance> {
         let _guard = common_telemetry::init_global_logging(
             "greptime-frontend",
-            &opts.logging,
-            &opts.tracing,
-            opts.node_id.clone(),
+            &self.frontend_options.logging,
+            &self.frontend_options.tracing,
+            self.frontend_options.node_id.clone(),
         );
 
         #[allow(clippy::unnecessary_mut_passed)]
-        let plugins = plugins::setup_frontend_plugins(&mut opts)
+        let plugins = plugins::setup_frontend_plugins(&mut self.frontend_options)
             .await
             .context(StartFrontendSnafu)?;
 
-        info!("Frontend start command: {:#?}", self);
-        info!("Frontend options: {:#?}", opts);
+        info!("Frontend start command: {:#?}", self.start_command);
+        info!("Frontend options: {:#?}", self.frontend_options);
 
-        set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+        set_default_timezone(self.frontend_options.default_timezone.as_deref())
+            .context(InitTimezoneSnafu)?;
 
-        let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
-            msg: "'meta_client'",
-        })?;
+        let meta_client_options =
+            self.frontend_options
+                .meta_client
+                .as_ref()
+                .context(MissingConfigSnafu {
+                    msg: "'meta_client'",
+                })?;
 
         let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
         let cache_ttl = meta_client_options.metadata_cache_ttl;
@@ -301,7 +236,7 @@ impl StartCommand {
                     name: TABLE_ROUTE_CACHE_NAME,
                 })?;
         let catalog_manager = KvBackendCatalogManager::new(
-            opts.mode,
+            self.frontend_options.mode,
             Some(meta_client.clone()),
             cached_meta_backend.clone(),
             table_cache,
@@ -317,9 +252,9 @@ impl StartCommand {
         ]);
 
         let heartbeat_task = HeartbeatTask::new(
-            &opts,
+            &self.frontend_options,
             meta_client.clone(),
-            opts.heartbeat.clone(),
+            self.frontend_options.heartbeat.clone(),
             Arc::new(executor),
         );
 
@@ -337,15 +272,94 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let servers = Services::new(opts.clone(), Arc::new(instance.clone()), plugins)
-            .build()
-            .await
-            .context(StartFrontendSnafu)?;
+        let servers = Services::new(
+            self.frontend_options.clone(),
+            Arc::new(instance.clone()),
+            plugins,
+        )
+        .build()
+        .await
+        .context(StartFrontendSnafu)?;
         instance
-            .build_servers(opts, servers)
+            .build_servers(self.frontend_options, servers)
             .context(StartFrontendSnafu)?;
 
         Ok(Instance::new(instance))
+    }
+
+    pub fn get_options(&self) -> FrontendOptions {
+        self.frontend_options.clone()
+    }
+
+    // The precedence order is: cli > config file > environment variables > default values.
+    fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        mut opts: FrontendOptions,
+    ) -> Result<FrontendOptions> {
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
+        }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        let tls_opts = TlsOption::new(
+            self.start_command.tls_mode.clone(),
+            self.start_command.tls_cert_path.clone(),
+            self.start_command.tls_key_path.clone(),
+        );
+
+        if let Some(addr) = &self.start_command.http_addr {
+            opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(http_timeout) = self.start_command.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout)
+        }
+
+        if let Some(disable_dashboard) = self.start_command.disable_dashboard {
+            opts.http.disable_dashboard = disable_dashboard;
+        }
+
+        if let Some(addr) = &self.start_command.rpc_addr {
+            opts.grpc.addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &self.start_command.mysql_addr {
+            opts.mysql.enable = true;
+            opts.mysql.addr.clone_from(addr);
+            opts.mysql.tls = tls_opts.clone();
+        }
+
+        if let Some(addr) = &self.start_command.postgres_addr {
+            opts.postgres.enable = true;
+            opts.postgres.addr.clone_from(addr);
+            opts.postgres.tls = tls_opts;
+        }
+
+        if let Some(enable) = self.start_command.influxdb_enable {
+            opts.influxdb.enable = enable;
+        }
+
+        if let Some(metasrv_addrs) = &self.start_command.metasrv_addrs {
+            opts.meta_client
+                .get_or_insert_with(MetaClientOptions::default)
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
+            opts.mode = Mode::Distributed;
+        }
+
+        opts.user_provider
+            .clone_from(&self.start_command.user_provider);
+
+        Ok(opts)
     }
 }
 
@@ -364,20 +378,26 @@ mod tests {
     use super::*;
     use crate::options::GlobalOptions;
 
+    fn create_options_by_cmd(cmd: Command) -> Result<FrontendOptions> {
+        let builder = cmd
+            .new_command_builder()
+            .build_options(&GlobalOptions::default())?;
+        Ok(builder.get_options())
+    }
+
     #[test]
     fn test_try_from_start_command() {
-        let command = StartCommand {
-            http_addr: Some("127.0.0.1:1234".to_string()),
-            mysql_addr: Some("127.0.0.1:5678".to_string()),
-            postgres_addr: Some("127.0.0.1:5432".to_string()),
-            influxdb_enable: Some(false),
-            disable_dashboard: Some(false),
-            ..Default::default()
-        };
-
-        let opts = command.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
+        let opts = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                http_addr: Some("127.0.0.1:1234".to_string()),
+                mysql_addr: Some("127.0.0.1:5678".to_string()),
+                postgres_addr: Some("127.0.0.1:5432".to_string()),
+                influxdb_enable: Some(false),
+                disable_dashboard: Some(false),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
         assert_eq!(ReadableSize::mb(64), opts.http.body_limit);
@@ -419,15 +439,15 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let command = StartCommand {
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            disable_dashboard: Some(false),
-            ..Default::default()
-        };
+        let fe_opts = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                config_file: Some(file.path().to_str().unwrap().to_string()),
+                disable_dashboard: Some(false),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
 
-        let fe_opts = command.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
         assert_eq!(Mode::Distributed, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
@@ -465,20 +485,23 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand {
-            disable_dashboard: Some(false),
-            ..Default::default()
+        let cmd = Command {
+            subcmd: SubCommand::Start(StartCommand {
+                ..Default::default()
+            }),
         };
 
         let options = cmd
-            .load_options(&GlobalOptions {
+            .new_command_builder()
+            .build_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .get_options();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -548,16 +571,15 @@ mod tests {
                 ),
             ],
             || {
-                let command = StartCommand {
-                    config_file: Some(file.path().to_str().unwrap().to_string()),
-                    http_addr: Some("127.0.0.1:14000".to_string()),
-                    env_prefix: env_prefix.to_string(),
-                    ..Default::default()
-                };
-
-                let fe_opts = command.load_options(&GlobalOptions::default()).unwrap() else {
-                    unreachable!()
-                };
+                let fe_opts = create_options_by_cmd(Command {
+                    subcmd: SubCommand::Start(StartCommand {
+                        config_file: Some(file.path().to_str().unwrap().to_string()),
+                        http_addr: Some("127.0.0.1:14000".to_string()),
+                        env_prefix: env_prefix.to_string(),
+                        ..Default::default()
+                    }),
+                })
+                .unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(fe_opts.mysql.runtime_size, 11);
