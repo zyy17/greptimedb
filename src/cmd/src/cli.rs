@@ -35,7 +35,7 @@ use common_telemetry::logging::LoggingOptions;
 use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
-use crate::error::Result;
+use crate::error::{MissingConfigSnafu, Result};
 use crate::options::GlobalOptions;
 use crate::App;
 
@@ -77,7 +77,7 @@ pub struct Command {
 
 impl Command {
     pub fn new_command_builder(self) -> CliCommandBuilder {
-        CliCommandBuilder::new().add_command(self.subcmd)
+        CliCommandBuilder::default().add_command(self.subcmd)
     }
 }
 
@@ -107,18 +107,11 @@ impl AttachCommand {
 
 #[derive(Default)]
 pub struct CliCommandBuilder {
-    logging_options: LoggingOptions,
+    logging_options: Option<LoggingOptions>,
     command: Option<SubCommand>,
 }
 
 impl CliCommandBuilder {
-    fn new() -> Self {
-        CliCommandBuilder {
-            logging_options: LoggingOptions::default(),
-            command: None,
-        }
-    }
-
     fn add_command(mut self, cmd: SubCommand) -> Self {
         self.command = Some(cmd);
         self
@@ -133,7 +126,7 @@ impl CliCommandBuilder {
 
         logging_opts.level.clone_from(&global_options.log_level);
 
-        self.logging_options = logging_opts;
+        self.logging_options = Some(logging_opts);
 
         Ok(self)
     }
@@ -146,8 +139,10 @@ impl CliCommandBuilder {
                 SubCommand::Export(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
             }
         } else {
-            // This should never happen because clap should catch this.
-            unreachable!("Subcommand is not set");
+            MissingConfigSnafu {
+                msg: "Missing command",
+            }
+            .fail()
         }
     }
 }
