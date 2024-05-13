@@ -81,36 +81,20 @@ pub struct Command {
     subcmd: SubCommand,
 }
 
-impl Command {
-    pub async fn build_instance(&self, opts: DatanodeOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
-    }
-
-    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        self.subcmd.load_options(global_options)
-    }
-}
-
 #[derive(Parser)]
 enum SubCommand {
     Start(StartCommand),
 }
 
-impl SubCommand {
-    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
-        match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
-        }
-    }
-
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        match self {
-            SubCommand::Start(cmd) => cmd.load_options(global_options),
+impl Command {
+    pub fn new_command_builder(self) -> DatanodeCommandBuilder {
+        match self.subcmd {
+            SubCommand::Start(cmd) => DatanodeCommandBuilder::new().add_start_command(cmd),
         }
     }
 }
 
-#[derive(Debug, Parser, Default)]
+#[derive(Default, Debug, Parser)]
 struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
@@ -134,17 +118,91 @@ struct StartCommand {
     env_prefix: String,
 }
 
-impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
-        Ok(self.merge_with_cli_options(
+#[derive(Default)]
+pub struct DatanodeCommandBuilder {
+    datanode_options: DatanodeOptions,
+    start_command: StartCommand,
+}
+
+impl DatanodeCommandBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_start_command(mut self, cmd: StartCommand) -> Self {
+        self.start_command = cmd;
+        self
+    }
+
+    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+        self.datanode_options = self.merge_with_cli_options(
             global_options,
             DatanodeOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
+                self.start_command.config_file.as_deref(),
+                self.start_command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
-        )?)
+        )?;
+        Ok(self)
+    }
+
+    pub async fn build_instance(mut self) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-datanode",
+            &self.datanode_options.logging,
+            &self.datanode_options.tracing,
+            self.datanode_options.node_id.map(|x| x.to_string()),
+        );
+
+        let plugins = plugins::setup_datanode_plugins(&mut self.datanode_options)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        info!("Datanode start command: {:#?}", self.start_command);
+        info!("Datanode options: {:#?}", self.datanode_options);
+
+        let node_id = self
+            .datanode_options
+            .node_id
+            .context(MissingConfigSnafu { msg: "'node_id'" })?;
+
+        let meta_config =
+            self.datanode_options
+                .meta_client
+                .as_ref()
+                .context(MissingConfigSnafu {
+                    msg: "'meta_client_options'",
+                })?;
+
+        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let mut datanode = DatanodeBuilder::new(self.datanode_options.clone(), plugins)
+            .with_meta_client(meta_client)
+            .with_kv_backend(meta_backend)
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let services = DatanodeServiceBuilder::new(&self.datanode_options)
+            .with_default_grpc_server(&datanode.region_server())
+            .enable_http_service()
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+        datanode.setup_services(services);
+
+        Ok(Instance::new(datanode))
+    }
+
+    pub fn get_options(&self) -> DatanodeOptions {
+        self.datanode_options.clone()
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -166,19 +224,20 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.rpc_addr {
+        if let Some(addr) = &self.start_command.rpc_addr {
             opts.rpc_addr.clone_from(addr);
         }
 
-        if self.rpc_hostname.is_some() {
-            opts.rpc_hostname.clone_from(&self.rpc_hostname);
+        if self.start_command.rpc_hostname.is_some() {
+            opts.rpc_hostname
+                .clone_from(&self.start_command.rpc_hostname);
         }
 
-        if let Some(node_id) = self.node_id {
+        if let Some(node_id) = self.start_command.node_id {
             opts.node_id = Some(node_id);
         }
 
-        if let Some(metasrv_addrs) = &self.metasrv_addrs {
+        if let Some(metasrv_addrs) = &self.start_command.metasrv_addrs {
             opts.meta_client
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
@@ -193,12 +252,12 @@ impl StartCommand {
             .fail();
         }
 
-        if let Some(data_home) = &self.data_home {
+        if let Some(data_home) = &self.start_command.data_home {
             opts.storage.data_home.clone_from(data_home);
         }
 
         // `wal_dir` only affects raft-engine config.
-        if let Some(wal_dir) = &self.wal_dir
+        if let Some(wal_dir) = &self.start_command.wal_dir
             && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
         {
             if raft_engine_config
@@ -211,11 +270,11 @@ impl StartCommand {
             raft_engine_config.dir.replace(wal_dir.clone());
         }
 
-        if let Some(http_addr) = &self.http_addr {
+        if let Some(http_addr) = &self.start_command.http_addr {
             opts.http.addr.clone_from(http_addr);
         }
 
-        if let Some(http_timeout) = self.http_timeout {
+        if let Some(http_timeout) = self.start_command.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout)
         }
 
@@ -223,55 +282,6 @@ impl StartCommand {
         opts.http.disable_dashboard = true;
 
         Ok(opts)
-    }
-
-    async fn build(&self, mut opts: DatanodeOptions) -> Result<Instance> {
-        let _guard = common_telemetry::init_global_logging(
-            "greptime-datanode",
-            &opts.logging,
-            &opts.tracing,
-            opts.node_id.map(|x| x.to_string()),
-        );
-
-        let plugins = plugins::setup_datanode_plugins(&mut opts)
-            .await
-            .context(StartDatanodeSnafu)?;
-
-        info!("Datanode start command: {:#?}", self);
-        info!("Datanode options: {:#?}", opts);
-
-        let node_id = opts
-            .node_id
-            .context(MissingConfigSnafu { msg: "'node_id'" })?;
-
-        let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
-            msg: "'meta_client_options'",
-        })?;
-
-        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
-            .await
-            .context(StartDatanodeSnafu)?;
-
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: Arc::new(meta_client.clone()),
-        });
-
-        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
-            .with_meta_client(meta_client)
-            .with_kv_backend(meta_backend)
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
-
-        let services = DatanodeServiceBuilder::new(&opts)
-            .with_default_grpc_server(&datanode.region_server())
-            .enable_http_service()
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
-        datanode.setup_services(services);
-
-        Ok(Instance::new(datanode))
     }
 }
 
@@ -288,6 +298,13 @@ mod tests {
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    fn create_options_by_cmd(cmd: Command) -> Result<DatanodeOptions> {
+        let builder = cmd
+            .new_command_builder()
+            .build_options(&GlobalOptions::default())?;
+        Ok(builder.get_options())
+    }
 
     #[test]
     fn test_read_from_config_file() {
@@ -338,15 +355,13 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let cmd = StartCommand {
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            ..Default::default()
-        };
-
-        let Options::Datanode(options) = cmd.load_options(&GlobalOptions::default()).unwrap()
-        else {
-            unreachable!()
-        };
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                config_file: Some(file.path().to_str().unwrap().to_string()),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
@@ -405,57 +420,66 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(&GlobalOptions::default())
-            .unwrap()
-        {
-            assert_eq!(Mode::Standalone, opt.mode)
-        }
-
-        if let Options::Datanode(opt) = (StartCommand {
-            node_id: Some(42),
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                ..Default::default()
+            }),
         })
-        .load_options(&GlobalOptions::default())
-        .unwrap()
-        {
-            assert_eq!(Mode::Distributed, opt.mode)
-        }
+        .unwrap();
 
-        assert!((StartCommand {
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
+        assert_eq!(Mode::Standalone, options.mode);
+
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                node_id: Some(42),
+                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                ..Default::default()
+            }),
         })
-        .load_options(&GlobalOptions::default())
+        .unwrap();
+
+        assert_eq!(Mode::Distributed, options.mode);
+
+        assert!(create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                ..Default::default()
+            }),
+        })
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        assert!((StartCommand {
-            node_id: Some(42),
-            ..Default::default()
+        assert!(create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                node_id: Some(42),
+                ..Default::default()
+            }),
         })
-        .load_options(&GlobalOptions::default())
         .is_ok());
     }
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand::default();
+        let cmd = Command {
+            subcmd: SubCommand::Start(StartCommand {
+                ..Default::default()
+            }),
+        };
 
         let options = cmd
-            .load_options(&GlobalOptions {
+            .new_command_builder()
+            .build_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .get_options();
 
-        let logging_opt = options.logging_options();
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
+        assert_eq!("debug", options.logging.level.as_ref().unwrap());
     }
 
     #[test]
@@ -526,18 +550,15 @@ mod tests {
                 ),
             ],
             || {
-                let command = StartCommand {
-                    config_file: Some(file.path().to_str().unwrap().to_string()),
-                    wal_dir: Some("/other/wal/dir".to_string()),
-                    env_prefix: env_prefix.to_string(),
-                    ..Default::default()
-                };
-
-                let Options::Datanode(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = create_options_by_cmd(Command {
+                    subcmd: SubCommand::Start(StartCommand {
+                        config_file: Some(file.path().to_str().unwrap().to_string()),
+                        wal_dir: Some("/other/wal/dir".to_string()),
+                        env_prefix: env_prefix.to_string(),
+                        ..Default::default()
+                    }),
+                })
+                .unwrap();
 
                 // Should be read from env, env > default values.
                 let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {

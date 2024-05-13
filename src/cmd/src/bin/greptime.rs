@@ -55,25 +55,38 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build_app(&self, global_options: &GlobalOptions) -> Result<Box<dyn App>> {
+    async fn build_app(self, global_options: &GlobalOptions) -> Result<Box<dyn App>> {
         match self {
             SubCommand::Datanode(cmd) => cmd
-                .build_instance(cmd.load_options(global_options)?)
+                .new_command_builder()
+                .build_options(global_options)?
+                .build_instance()
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Frontend(cmd) => cmd
-                .build_instance(cmd.build_options(global_options)?)
+                .new_command_builder()
+                .build_options(global_options)?
+                .build_instance()
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Metasrv(cmd) => cmd
-                .build_instance(cmd.build_options(global_options)?)
+                .new_command_builder()
+                .build_options(global_options)?
+                .build_instance()
                 .await
                 .map(|x| Box::new(x) as _),
             SubCommand::Standalone(cmd) => cmd
-                .build_instance(cmd.build_options(global_options)?)
+                .new_command_builder()
+                .build_options(global_options)?
+                .build_instance()
                 .await
                 .map(|x| Box::new(x) as _),
-            SubCommand::Cli(cmd) => cmd.build_instance().await.map(|x| Box::new(x) as _),
+            SubCommand::Cli(cmd) => cmd
+                .new_command_builder()
+                .build_options(global_options)?
+                .build_instance()
+                .await
+                .map(|x| Box::new(x) as _),
         }
     }
 }

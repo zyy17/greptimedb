@@ -66,32 +66,16 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build_instance(&self, opts: MetasrvOptions) -> Result<Instance> {
-        self.subcmd.build_instance(opts).await
-    }
-
-    pub fn build_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
-        self.subcmd.build_options(global_options)
+    pub fn new_command_builder(self) -> MetasrvCommandBuilder {
+        match self.subcmd {
+            SubCommand::Start(cmd) => MetasrvCommandBuilder::new().add_start_command(cmd),
+        }
     }
 }
 
 #[derive(Parser)]
 enum SubCommand {
     Start(StartCommand),
-}
-
-impl SubCommand {
-    async fn build_instance(&self, opts: MetasrvOptions) -> Result<Instance> {
-        match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
-        }
-    }
-
-    fn build_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
-        match self {
-            SubCommand::Start(cmd) => cmd.load_options(global_options),
-        }
-    }
 }
 
 #[derive(Debug, Default, Parser)]
@@ -127,17 +111,65 @@ struct StartCommand {
     max_txn_ops: Option<usize>,
 }
 
-impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
-        Ok(self.merge_with_cli_options(
+#[derive(Default)]
+pub struct MetasrvCommandBuilder {
+    metasrv_options: MetasrvOptions,
+    start_command: StartCommand,
+}
+
+impl MetasrvCommandBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_start_command(mut self, cmd: StartCommand) -> Self {
+        self.start_command = cmd;
+        self
+    }
+
+    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+        self.metasrv_options = self.merge_with_cli_options(
             global_options,
             MetasrvOptions::load_layered_options(
-                self.config_file.as_deref(),
-                self.env_prefix.as_ref(),
+                self.start_command.config_file.as_deref(),
+                self.start_command.env_prefix.as_ref(),
             )
             .map_err(Box::new)
             .context(LoadLayeredConfigSnafu)?,
-        )?)
+        )?;
+        Ok(self)
+    }
+
+    pub async fn build_instance(mut self) -> Result<Instance> {
+        let _guard = common_telemetry::init_global_logging(
+            "greptime-metasrv",
+            &self.metasrv_options.logging,
+            &self.metasrv_options.tracing,
+            None,
+        );
+
+        let plugins = plugins::setup_metasrv_plugins(&mut self.metasrv_options)
+            .await
+            .context(StartMetaServerSnafu)?;
+
+        info!("Metasrv start command: {:#?}", self.start_command);
+        info!("Metasrv options: {:#?}", self.metasrv_options);
+
+        let builder =
+            meta_srv::bootstrap::metasrv_builder(&self.metasrv_options, plugins.clone(), None)
+                .await
+                .context(error::BuildMetaServerSnafu)?;
+        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        let instance = MetasrvInstance::new(self.metasrv_options, plugins, metasrv)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+
+        Ok(Instance::new(instance))
+    }
+
+    pub fn get_options(&self) -> MetasrvOptions {
+        self.metasrv_options.clone()
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -159,49 +191,50 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
-        if let Some(addr) = &self.bind_addr {
+        if let Some(addr) = &self.start_command.bind_addr {
             opts.bind_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.server_addr {
+        if let Some(addr) = &self.start_command.server_addr {
             opts.server_addr.clone_from(addr);
         }
 
-        if let Some(addr) = &self.store_addr {
+        if let Some(addr) = &self.start_command.store_addr {
             opts.store_addr.clone_from(addr);
         }
 
-        if let Some(selector_type) = &self.selector {
+        if let Some(selector_type) = &self.start_command.selector {
             opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
         }
 
-        if let Some(use_memory_store) = self.use_memory_store {
+        if let Some(use_memory_store) = self.start_command.use_memory_store {
             opts.use_memory_store = use_memory_store;
         }
 
-        if let Some(enable_region_failover) = self.enable_region_failover {
+        if let Some(enable_region_failover) = self.start_command.enable_region_failover {
             opts.enable_region_failover = enable_region_failover;
         }
 
-        if let Some(http_addr) = &self.http_addr {
+        if let Some(http_addr) = &self.start_command.http_addr {
             opts.http.addr.clone_from(http_addr);
         }
 
-        if let Some(http_timeout) = self.http_timeout {
+        if let Some(http_timeout) = self.start_command.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
-        if let Some(data_home) = &self.data_home {
+        if let Some(data_home) = &self.start_command.data_home {
             opts.data_home.clone_from(data_home);
         }
 
-        if !self.store_key_prefix.is_empty() {
-            opts.store_key_prefix.clone_from(&self.store_key_prefix)
+        if !self.start_command.store_key_prefix.is_empty() {
+            opts.store_key_prefix
+                .clone_from(&self.start_command.store_key_prefix)
         }
 
-        if let Some(max_txn_ops) = self.max_txn_ops {
+        if let Some(max_txn_ops) = self.start_command.max_txn_ops {
             opts.max_txn_ops = max_txn_ops;
         }
 
@@ -209,33 +242,6 @@ impl StartCommand {
         opts.http.disable_dashboard = true;
 
         Ok(opts)
-    }
-
-    async fn build(&self, mut opts: MetasrvOptions) -> Result<Instance> {
-        let _guard = common_telemetry::init_global_logging(
-            "greptime-metasrv",
-            &opts.logging,
-            &opts.tracing,
-            None,
-        );
-
-        let plugins = plugins::setup_metasrv_plugins(&mut opts)
-            .await
-            .context(StartMetaServerSnafu)?;
-
-        info!("Metasrv start command: {:#?}", self);
-        info!("Metasrv options: {:#?}", opts);
-
-        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
-            .await
-            .context(error::BuildMetaServerSnafu)?;
-        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
-
-        let instance = MetasrvInstance::new(opts, plugins, metasrv)
-            .await
-            .context(error::BuildMetaServerSnafu)?;
-
-        Ok(Instance::new(instance))
     }
 }
 
@@ -250,19 +256,26 @@ mod tests {
 
     use super::*;
 
+    fn create_options_by_cmd(cmd: Command) -> Result<MetasrvOptions> {
+        let builder = cmd
+            .new_command_builder()
+            .build_options(&GlobalOptions::default())?;
+        Ok(builder.get_options())
+    }
+
     #[test]
     fn test_read_from_cmd() {
-        let cmd = StartCommand {
-            bind_addr: Some("127.0.0.1:3002".to_string()),
-            server_addr: Some("127.0.0.1:3002".to_string()),
-            store_addr: Some("127.0.0.1:2380".to_string()),
-            selector: Some("LoadBased".to_string()),
-            ..Default::default()
-        };
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                bind_addr: Some("127.0.0.1:3002".to_string()),
+                server_addr: Some("127.0.0.1:3002".to_string()),
+                store_addr: Some("127.0.0.1:2380".to_string()),
+                selector: Some("LoadBased".to_string()),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
 
-        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -281,7 +294,7 @@ mod tests {
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
-            
+
             [failure_detector]
             threshold = 8.0
             min_std_deviation = "100ms"
@@ -290,14 +303,14 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let cmd = StartCommand {
-            config_file: Some(file.path().to_str().unwrap().to_string()),
-            ..Default::default()
-        };
+        let options = create_options_by_cmd(Command {
+            subcmd: SubCommand::Start(StartCommand {
+                config_file: Some(file.path().to_str().unwrap().to_string()),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
 
-        let Options::Metasrv(options) = cmd.load_options(&GlobalOptions::default()).unwrap() else {
-            unreachable!()
-        };
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
@@ -331,27 +344,30 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand {
-            bind_addr: Some("127.0.0.1:3002".to_string()),
-            server_addr: Some("127.0.0.1:3002".to_string()),
-            store_addr: Some("127.0.0.1:2380".to_string()),
-            selector: Some("LoadBased".to_string()),
-            ..Default::default()
+        let cmd = Command {
+            subcmd: SubCommand::Start(StartCommand {
+                bind_addr: Some("127.0.0.1:3002".to_string()),
+                server_addr: Some("127.0.0.1:3002".to_string()),
+                store_addr: Some("127.0.0.1:2380".to_string()),
+                selector: Some("LoadBased".to_string()),
+                ..Default::default()
+            }),
         };
 
         let options = cmd
-            .load_options(&GlobalOptions {
+            .new_command_builder()
+            .build_options(&GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
             })
-            .unwrap();
+            .unwrap()
+            .get_options();
 
-        let logging_opt = options.logging_options();
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
-        assert_eq!("debug", logging_opt.level.as_ref().unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
+        assert_eq!("debug", options.logging.level.as_ref().unwrap());
     }
 
     #[test]
@@ -397,18 +413,15 @@ mod tests {
                 ),
             ],
             || {
-                let command = StartCommand {
-                    http_addr: Some("127.0.0.1:14000".to_string()),
-                    config_file: Some(file.path().to_str().unwrap().to_string()),
-                    env_prefix: env_prefix.to_string(),
-                    ..Default::default()
-                };
-
-                let Options::Metasrv(opts) =
-                    command.load_options(&GlobalOptions::default()).unwrap()
-                else {
-                    unreachable!()
-                };
+                let opts = create_options_by_cmd(Command {
+                    subcmd: SubCommand::Start(StartCommand {
+                        http_addr: Some("127.0.0.1:14000".to_string()),
+                        config_file: Some(file.path().to_str().unwrap().to_string()),
+                        env_prefix: env_prefix.to_string(),
+                        ..Default::default()
+                    }),
+                })
+                .unwrap();
 
                 // Should be read from env, env > default values.
                 assert_eq!(opts.bind_addr, "127.0.0.1:14002");
