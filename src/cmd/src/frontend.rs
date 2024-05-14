@@ -41,7 +41,7 @@ use crate::error::{
     self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartFrontendSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 pub struct Instance {
     frontend: FeInstance,
@@ -50,14 +50,6 @@ pub struct Instance {
 impl Instance {
     pub fn new(frontend: FeInstance) -> Self {
         Self { frontend }
-    }
-
-    pub fn mut_inner(&mut self) -> &mut FeInstance {
-        &mut self.frontend
-    }
-
-    pub fn inner(&self) -> &FeInstance {
-        &self.frontend
     }
 }
 
@@ -92,9 +84,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> FrontendCommandBuilder {
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> FrontendAppBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => FrontendCommandBuilder::default().add_command(cmd),
+            SubCommand::Start(cmd) => FrontendAppBuilder::new(cmd, global_options),
         }
     }
 }
@@ -137,22 +129,19 @@ pub struct StartCommand {
 }
 
 #[derive(Default)]
-pub struct FrontendCommandBuilder {
-    frontend_options: Option<FrontendOptions>,
+pub struct FrontendAppBuilder {
     command: Option<StartCommand>,
+    global_options: GlobalOptions,
+    frontend_options: Option<FrontendOptions>,
 }
 
-impl FrontendCommandBuilder {
-    fn add_command(mut self, cmd: StartCommand) -> Self {
-        self.command = Some(cmd);
-        self
-    }
-
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+#[async_trait]
+impl AppBuilder for FrontendAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
         if let Some(cmd) = &self.command {
             self.frontend_options = Some(
                 self.merge_with_cli_options(
-                    global_options,
+                    &self.global_options,
                     FrontendOptions::load_layered_options(
                         cmd.config_file.as_deref(),
                         cmd.env_prefix.as_ref(),
@@ -170,7 +159,7 @@ impl FrontendCommandBuilder {
         }
     }
 
-    pub async fn build_app(self) -> Result<Box<dyn App>> {
+    async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(mut options) = self.frontend_options {
             let _guard = common_telemetry::init_global_logging(
                 APP_NAME,
@@ -267,9 +256,15 @@ impl FrontendCommandBuilder {
             .fail()
         }
     }
+}
 
-    pub fn get_options(&self) -> Option<FrontendOptions> {
-        self.frontend_options.clone()
+impl FrontendAppBuilder {
+    fn new(cmd: StartCommand, global_options: GlobalOptions) -> Self {
+        FrontendAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
+        }
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -348,6 +343,10 @@ impl FrontendCommandBuilder {
             .fail()
         }
     }
+
+    pub fn get_options(&self) -> Option<FrontendOptions> {
+        self.frontend_options.clone()
+    }
 }
 
 #[cfg(test)]
@@ -365,25 +364,29 @@ mod tests {
     use super::*;
     use crate::options::GlobalOptions;
 
-    fn create_options_by_cmd(cmd: Command) -> Result<FrontendOptions> {
-        let builder = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions::default())?;
+    fn create_options_by_cmd(
+        cmd: Command,
+        global_options: GlobalOptions,
+    ) -> Result<FrontendOptions> {
+        let builder = cmd.new_app_builder(global_options).build_options()?;
         Ok(builder.get_options().unwrap())
     }
 
     #[test]
     fn test_try_from_start_command() {
-        let opts = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                http_addr: Some("127.0.0.1:1234".to_string()),
-                mysql_addr: Some("127.0.0.1:5678".to_string()),
-                postgres_addr: Some("127.0.0.1:5432".to_string()),
-                influxdb_enable: Some(false),
-                disable_dashboard: Some(false),
-                ..Default::default()
-            }),
-        })
+        let opts = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    http_addr: Some("127.0.0.1:1234".to_string()),
+                    mysql_addr: Some("127.0.0.1:5678".to_string()),
+                    postgres_addr: Some("127.0.0.1:5432".to_string()),
+                    influxdb_enable: Some(false),
+                    disable_dashboard: Some(false),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!(opts.http.addr, "127.0.0.1:1234");
@@ -426,13 +429,16 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let fe_opts = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                config_file: Some(file.path().to_str().unwrap().to_string()),
-                disable_dashboard: Some(false),
-                ..Default::default()
-            }),
-        })
+        let fe_opts = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    disable_dashboard: Some(false),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!(Mode::Distributed, fe_opts.mode);
@@ -472,24 +478,21 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = Command {
-            subcmd: SubCommand::Start(StartCommand {
-                ..Default::default()
-            }),
-        };
-
-        let options = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions {
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
-            })
-            .unwrap()
-            .get_options()
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -559,14 +562,17 @@ mod tests {
                 ),
             ],
             || {
-                let fe_opts = create_options_by_cmd(Command {
-                    subcmd: SubCommand::Start(StartCommand {
-                        config_file: Some(file.path().to_str().unwrap().to_string()),
-                        http_addr: Some("127.0.0.1:14000".to_string()),
-                        env_prefix: env_prefix.to_string(),
-                        ..Default::default()
-                    }),
-                })
+                let fe_opts = create_options_by_cmd(
+                    Command {
+                        subcmd: SubCommand::Start(StartCommand {
+                            config_file: Some(file.path().to_str().unwrap().to_string()),
+                            http_addr: Some("127.0.0.1:14000".to_string()),
+                            env_prefix: env_prefix.to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                    GlobalOptions::default(),
+                )
                 .unwrap();
 
                 // Should be read from env, env > default values.

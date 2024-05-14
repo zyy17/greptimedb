@@ -65,6 +65,21 @@ pub trait App: Send {
     }
 }
 
+/// AppBuilder is a trait builds the App from the options and starts the App.
+#[async_trait]
+pub trait AppBuilder: Default {
+    /// Build the options.
+    fn build_options(self) -> Result<Self>;
+
+    /// Build the App.
+    async fn build_app(self) -> Result<Box<dyn App>>;
+
+    /// Build the options and app, then start the app.
+    async fn start(self) -> Result<()> {
+        self.build_options()?.build_app().await?.run().await
+    }
+}
+
 /// Log the versions of the application, and the arguments passed to the cli.
 /// `version_string` should be the same as the output of cli "--version";
 /// and the `app_version` is the short version of the codes, often consist of git branch and commit.

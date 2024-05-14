@@ -64,7 +64,7 @@ use crate::error::{
     StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 pub struct Instance {
     datanode: Datanode,
@@ -130,9 +130,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> StandaloneCommandBuilder {
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> StandaloneAppBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => StandaloneCommandBuilder::default().add_command(cmd),
+            SubCommand::Start(cmd) => StandaloneAppBuilder::new(cmd, global_options),
         }
     }
 }
@@ -268,22 +268,19 @@ pub struct StartCommand {
 }
 
 #[derive(Default)]
-pub struct StandaloneCommandBuilder {
-    standalone_options: Option<StandaloneOptions>,
+pub struct StandaloneAppBuilder {
     command: Option<StartCommand>,
+    global_options: GlobalOptions,
+    standalone_options: Option<StandaloneOptions>,
 }
 
-impl StandaloneCommandBuilder {
-    fn add_command(mut self, cmd: StartCommand) -> Self {
-        self.command = Some(cmd);
-        self
-    }
-
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+#[async_trait]
+impl AppBuilder for StandaloneAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
         if let Some(cmd) = &self.command {
             self.standalone_options = Some(
                 self.merge_with_cli_options(
-                    global_options,
+                    &self.global_options,
                     StandaloneOptions::load_layered_options(
                         cmd.config_file.as_deref(),
                         cmd.env_prefix.as_ref(),
@@ -304,7 +301,7 @@ impl StandaloneCommandBuilder {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    pub async fn build_app(self) -> Result<Box<dyn App>> {
+    async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(options) = self.standalone_options {
             let _guard = common_telemetry::init_global_logging(
                 APP_NAME,
@@ -426,9 +423,15 @@ impl StandaloneCommandBuilder {
             .fail()
         }
     }
+}
 
-    pub fn get_options(&self) -> Option<StandaloneOptions> {
-        self.standalone_options.clone()
+impl StandaloneAppBuilder {
+    fn new(cmd: StartCommand, global_options: GlobalOptions) -> Self {
+        StandaloneAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
+        }
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -508,6 +511,10 @@ impl StandaloneCommandBuilder {
         }
     }
 
+    pub fn get_options(&self) -> Option<StandaloneOptions> {
+        self.standalone_options.clone()
+    }
+
     pub async fn create_ddl_task_executor(
         procedure_manager: ProcedureManagerRef,
         node_manager: NodeManagerRef,
@@ -568,10 +575,11 @@ mod tests {
     use super::*;
     use crate::options::GlobalOptions;
 
-    fn create_options_by_cmd(cmd: Command) -> Result<StandaloneOptions> {
-        let builder = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions::default())?;
+    fn create_options_by_cmd(
+        cmd: Command,
+        global_options: GlobalOptions,
+    ) -> Result<StandaloneOptions> {
+        let builder = cmd.new_app_builder(global_options).build_options()?;
         Ok(builder.get_options().unwrap())
     }
 
@@ -656,13 +664,16 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                config_file: Some(file.path().to_str().unwrap().to_string()),
-                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         let fe_opts = options.frontend_options();
@@ -712,25 +723,22 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = Command {
-            subcmd: SubCommand::Start(StartCommand {
-                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-                ..Default::default()
-            }),
-        };
-
-        let options = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions {
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
-            })
-            .unwrap()
-            .get_options()
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -785,14 +793,17 @@ mod tests {
                 ),
             ],
             || {
-                let opts = create_options_by_cmd(Command {
-                    subcmd: SubCommand::Start(StartCommand {
-                        config_file: Some(file.path().to_str().unwrap().to_string()),
-                        http_addr: Some("127.0.0.1:14000".to_string()),
-                        env_prefix: env_prefix.to_string(),
-                        ..Default::default()
-                    }),
-                })
+                let opts = create_options_by_cmd(
+                    Command {
+                        subcmd: SubCommand::Start(StartCommand {
+                            config_file: Some(file.path().to_str().unwrap().to_string()),
+                            http_addr: Some("127.0.0.1:14000".to_string()),
+                            env_prefix: env_prefix.to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                    GlobalOptions::default(),
+                )
                 .unwrap();
 
                 // Should be read from env, env > default values.

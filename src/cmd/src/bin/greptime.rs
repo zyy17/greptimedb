@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone};
+use cmd::{cli, datanode, frontend, log_versions, metasrv, standalone, AppBuilder};
 use common_version::{short_version, version};
 
 #[derive(Parser)]
@@ -61,53 +61,8 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_human_panic();
-    start(Command::parse()).await
-}
-
-async fn start(cli: Command) -> Result<()> {
     log_versions(version!(), short_version!());
-    match cli.subcmd {
-        SubCommand::Datanode(cmd) => {
-            cmd.new_command_builder()
-                .build_options(&cli.global_options)?
-                .build_app()
-                .await?
-                .run()
-                .await
-        }
-        SubCommand::Frontend(cmd) => {
-            cmd.new_command_builder()
-                .build_options(&cli.global_options)?
-                .build_app()
-                .await?
-                .run()
-                .await
-        }
-        SubCommand::Metasrv(cmd) => {
-            cmd.new_command_builder()
-                .build_options(&cli.global_options)?
-                .build_app()
-                .await?
-                .run()
-                .await
-        }
-        SubCommand::Standalone(cmd) => {
-            cmd.new_command_builder()
-                .build_options(&cli.global_options)?
-                .build_app()
-                .await?
-                .run()
-                .await
-        }
-        SubCommand::Cli(cmd) => {
-            cmd.new_command_builder()
-                .build_options(&cli.global_options)?
-                .build_app()
-                .await?
-                .run()
-                .await
-        }
-    }
+    start(Command::parse()).await
 }
 
 fn setup_human_panic() {
@@ -120,4 +75,14 @@ fn setup_human_panic() {
     human_panic::setup_panic!(metadata);
 
     common_telemetry::set_panic_hook();
+}
+
+async fn start(cli: Command) -> Result<()> {
+    match cli.subcmd {
+        SubCommand::Datanode(cmd) => cmd.new_app_builder(cli.global_options).start().await,
+        SubCommand::Frontend(cmd) => cmd.new_app_builder(cli.global_options).start().await,
+        SubCommand::Metasrv(cmd) => cmd.new_app_builder(cli.global_options).start().await,
+        SubCommand::Standalone(cmd) => cmd.new_app_builder(cli.global_options).start().await,
+        SubCommand::Cli(cmd) => cmd.new_app_builder(cli.global_options).start().await,
+    }
 }

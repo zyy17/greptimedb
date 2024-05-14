@@ -33,7 +33,7 @@ use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 pub struct Instance {
     datanode: Datanode,
@@ -42,14 +42,6 @@ pub struct Instance {
 impl Instance {
     pub fn new(datanode: Datanode) -> Self {
         Self { datanode }
-    }
-
-    pub fn datanode_mut(&mut self) -> &mut Datanode {
-        &mut self.datanode
-    }
-
-    pub fn datanode(&self) -> &Datanode {
-        &self.datanode
     }
 }
 
@@ -89,9 +81,9 @@ enum SubCommand {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> DatanodeCommandBuilder {
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> DatanodeAppBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => DatanodeCommandBuilder::default().add_command(cmd),
+            SubCommand::Start(cmd) => DatanodeAppBuilder::new(cmd, global_options),
         }
     }
 }
@@ -121,22 +113,19 @@ struct StartCommand {
 }
 
 #[derive(Default)]
-pub struct DatanodeCommandBuilder {
-    datanode_options: Option<DatanodeOptions>,
+pub struct DatanodeAppBuilder {
     command: Option<StartCommand>,
+    global_options: GlobalOptions,
+    datanode_options: Option<DatanodeOptions>,
 }
 
-impl DatanodeCommandBuilder {
-    fn add_command(mut self, cmd: StartCommand) -> Self {
-        self.command = Some(cmd);
-        self
-    }
-
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+#[async_trait]
+impl AppBuilder for DatanodeAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
         if let Some(cmd) = &self.command {
             self.datanode_options = Some(
                 self.merge_with_cli_options(
-                    global_options,
+                    &self.global_options,
                     DatanodeOptions::load_layered_options(
                         cmd.config_file.as_deref(),
                         cmd.env_prefix.as_ref(),
@@ -154,7 +143,7 @@ impl DatanodeCommandBuilder {
         }
     }
 
-    pub async fn build_app(self) -> Result<Box<dyn App>> {
+    async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(mut options) = self.datanode_options {
             let _guard = common_telemetry::init_global_logging(
                 APP_NAME,
@@ -209,9 +198,15 @@ impl DatanodeCommandBuilder {
             .fail()
         }
     }
+}
 
-    pub fn get_options(&self) -> Option<DatanodeOptions> {
-        self.datanode_options.clone()
+impl DatanodeAppBuilder {
+    fn new(cmd: StartCommand, global_options: GlobalOptions) -> Self {
+        DatanodeAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
+        }
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -298,6 +293,10 @@ impl DatanodeCommandBuilder {
             .fail()
         }
     }
+
+    pub fn get_options(&self) -> Option<DatanodeOptions> {
+        self.datanode_options.clone()
+    }
 }
 
 #[cfg(test)]
@@ -314,10 +313,11 @@ mod tests {
     use super::*;
     use crate::options::GlobalOptions;
 
-    fn create_options_by_cmd(cmd: Command) -> Result<DatanodeOptions> {
-        let builder = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions::default())?;
+    fn create_options_by_cmd(
+        cmd: Command,
+        global_options: GlobalOptions,
+    ) -> Result<DatanodeOptions> {
+        let builder = cmd.new_app_builder(global_options).build_options()?;
         Ok(builder.get_options().unwrap())
     }
 
@@ -370,12 +370,15 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                config_file: Some(file.path().to_str().unwrap().to_string()),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
@@ -435,64 +438,73 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!(Mode::Standalone, options.mode);
 
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                node_id: Some(42),
-                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    node_id: Some(42),
+                    metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!(Mode::Distributed, options.mode);
 
-        assert!(create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-                ..Default::default()
-            }),
-        })
+        assert!(create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
-        assert!(create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                node_id: Some(42),
-                ..Default::default()
-            }),
-        })
+        assert!(create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    node_id: Some(42),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .is_ok());
     }
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = Command {
-            subcmd: SubCommand::Start(StartCommand {
-                ..Default::default()
-            }),
-        };
-
-        let options = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions {
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
-            })
-            .unwrap()
-            .get_options()
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -566,14 +578,17 @@ mod tests {
                 ),
             ],
             || {
-                let opts = create_options_by_cmd(Command {
-                    subcmd: SubCommand::Start(StartCommand {
-                        config_file: Some(file.path().to_str().unwrap().to_string()),
-                        wal_dir: Some("/other/wal/dir".to_string()),
-                        env_prefix: env_prefix.to_string(),
-                        ..Default::default()
-                    }),
-                })
+                let opts = create_options_by_cmd(
+                    Command {
+                        subcmd: SubCommand::Start(StartCommand {
+                            config_file: Some(file.path().to_str().unwrap().to_string()),
+                            wal_dir: Some("/other/wal/dir".to_string()),
+                            env_prefix: env_prefix.to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                    GlobalOptions::default(),
+                )
                 .unwrap();
 
                 // Should be read from env, env > default values.
