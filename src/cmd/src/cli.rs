@@ -37,7 +37,7 @@ use upgrade::UpgradeCommand;
 use self::export::ExportCommand;
 use crate::error::{MissingConfigSnafu, Result};
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -78,8 +78,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> CliCommandBuilder {
-        CliCommandBuilder::default().add_command(self.subcmd)
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> CliAppBuilder {
+        CliAppBuilder::new(self.subcmd, global_options)
     }
 }
 
@@ -108,32 +108,31 @@ impl AttachCommand {
 }
 
 #[derive(Default)]
-pub struct CliCommandBuilder {
-    logging_options: Option<LoggingOptions>,
+pub struct CliAppBuilder {
     command: Option<SubCommand>,
+    global_options: GlobalOptions,
+    logging_options: Option<LoggingOptions>,
 }
 
-impl CliCommandBuilder {
-    fn add_command(mut self, cmd: SubCommand) -> Self {
-        self.command = Some(cmd);
-        self
-    }
-
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
+#[async_trait]
+impl AppBuilder for CliAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
         let mut logging_opts = LoggingOptions::default();
 
-        if let Some(dir) = &global_options.log_dir {
+        if let Some(dir) = &self.global_options.log_dir {
             logging_opts.dir.clone_from(dir);
         }
 
-        logging_opts.level.clone_from(&global_options.log_level);
+        logging_opts
+            .level
+            .clone_from(&self.global_options.log_level);
 
         self.logging_options = Some(logging_opts);
 
         Ok(self)
     }
 
-    pub async fn build_app(self) -> Result<Box<dyn App>> {
+    async fn build_app(self) -> Result<Box<dyn App>> {
         if let Some(subcmd) = self.command {
             match subcmd {
                 SubCommand::Upgrade(cmd) => cmd.build().await.map(|x| Box::new(x) as _),
@@ -145,6 +144,16 @@ impl CliCommandBuilder {
                 msg: "Missing command",
             }
             .fail()
+        }
+    }
+}
+
+impl CliAppBuilder {
+    fn new(cmd: SubCommand, global_options: GlobalOptions) -> Self {
+        CliAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
         }
     }
 }

@@ -23,9 +23,11 @@ use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::MetasrvOptions;
 use snafu::ResultExt;
 
-use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
+use crate::error::{
+    self, LoadLayeredConfigSnafu, MissingConfigSnafu, Result, StartMetaServerSnafu,
+};
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 pub struct Instance {
     instance: MetasrvInstance,
@@ -68,9 +70,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> MetasrvCommandBuilder {
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> MetasrvAppBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => MetasrvCommandBuilder::new().add_start_command(cmd),
+            SubCommand::Start(cmd) => MetasrvAppBuilder::new(cmd, global_options),
         }
     }
 }
@@ -114,63 +116,77 @@ struct StartCommand {
 }
 
 #[derive(Default)]
-pub struct MetasrvCommandBuilder {
-    metasrv_options: MetasrvOptions,
-    start_command: StartCommand,
+pub struct MetasrvAppBuilder {
+    command: Option<StartCommand>,
+    global_options: GlobalOptions,
+    metasrv_options: Option<MetasrvOptions>,
 }
 
-impl MetasrvCommandBuilder {
-    fn new() -> Self {
-        Self::default()
+#[async_trait]
+impl AppBuilder for MetasrvAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
+        if let Some(cmd) = &self.command {
+            self.metasrv_options = Some(
+                self.merge_with_cli_options(
+                    &self.global_options,
+                    MetasrvOptions::load_layered_options(
+                        cmd.config_file.as_deref(),
+                        cmd.env_prefix.as_ref(),
+                    )
+                    .context(LoadLayeredConfigSnafu)?,
+                )?,
+            );
+            Ok(self)
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing command",
+            }
+            .fail()
+        }
     }
 
-    fn add_start_command(mut self, cmd: StartCommand) -> Self {
-        self.start_command = cmd;
-        self
-    }
+    async fn build_app(self) -> Result<Box<dyn App>> {
+        if let Some(mut options) = self.metasrv_options {
+            let _guard = common_telemetry::init_global_logging(
+                APP_NAME,
+                &options.logging,
+                &options.tracing,
+                None,
+            );
 
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
-        self.metasrv_options = self.merge_with_cli_options(
-            global_options,
-            MetasrvOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
-        )?;
-        Ok(self)
-    }
+            let plugins = plugins::setup_metasrv_plugins(&mut options)
+                .await
+                .context(StartMetaServerSnafu)?;
 
-    pub async fn build_app(mut self) -> Result<Box<dyn App>> {
-        let _guard = common_telemetry::init_global_logging(
-            "greptime-metasrv",
-            &self.metasrv_options.logging,
-            &self.metasrv_options.tracing,
-            None,
-        );
+            info!("Metasrv start command: {:#?}", self.command);
+            info!("Metasrv options: {:#?}", options);
 
-        let plugins = plugins::setup_metasrv_plugins(&mut self.metasrv_options)
-            .await
-            .context(StartMetaServerSnafu)?;
-
-        info!("Metasrv start command: {:#?}", self.start_command);
-        info!("Metasrv options: {:#?}", self.metasrv_options);
-
-        let builder =
-            meta_srv::bootstrap::metasrv_builder(&self.metasrv_options, plugins.clone(), None)
+            let builder = meta_srv::bootstrap::metasrv_builder(&options, plugins.clone(), None)
                 .await
                 .context(error::BuildMetaServerSnafu)?;
-        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+            let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
 
-        let instance = MetasrvInstance::new(self.metasrv_options, plugins, metasrv)
-            .await
-            .context(error::BuildMetaServerSnafu)?;
+            let instance = MetasrvInstance::new(options, plugins, metasrv)
+                .await
+                .context(error::BuildMetaServerSnafu)?;
 
-        Ok(Box::new(Instance::new(instance)))
+            Ok(Box::new(Instance::new(instance)))
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing options",
+            }
+            .fail()
+        }
     }
+}
 
-    pub fn get_options(&self) -> MetasrvOptions {
-        self.metasrv_options.clone()
+impl MetasrvAppBuilder {
+    fn new(cmd: StartCommand, global_options: GlobalOptions) -> Self {
+        MetasrvAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
+        }
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -179,70 +195,80 @@ impl MetasrvCommandBuilder {
         global_options: &GlobalOptions,
         mut opts: MetasrvOptions,
     ) -> Result<MetasrvOptions> {
-        if let Some(dir) = &global_options.log_dir {
-            opts.logging.dir.clone_from(dir);
+        if let Some(cmd) = &self.command {
+            if let Some(dir) = &global_options.log_dir {
+                opts.logging.dir.clone_from(dir);
+            }
+
+            if global_options.log_level.is_some() {
+                opts.logging.level.clone_from(&global_options.log_level);
+            }
+
+            opts.tracing = TracingOptions {
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: global_options.tokio_console_addr.clone(),
+            };
+
+            if let Some(addr) = &cmd.bind_addr {
+                opts.bind_addr.clone_from(addr);
+            }
+
+            if let Some(addr) = &cmd.server_addr {
+                opts.server_addr.clone_from(addr);
+            }
+
+            if let Some(addr) = &cmd.store_addrs {
+                opts.store_addrs.clone_from(addr);
+            }
+
+            if let Some(selector_type) = &cmd.selector {
+                opts.selector = selector_type[..]
+                    .try_into()
+                    .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
+            }
+
+            if let Some(use_memory_store) = cmd.use_memory_store {
+                opts.use_memory_store = use_memory_store;
+            }
+
+            if let Some(enable_region_failover) = cmd.enable_region_failover {
+                opts.enable_region_failover = enable_region_failover;
+            }
+
+            if let Some(http_addr) = &cmd.http_addr {
+                opts.http.addr.clone_from(http_addr);
+            }
+
+            if let Some(http_timeout) = cmd.http_timeout {
+                opts.http.timeout = Duration::from_secs(http_timeout);
+            }
+
+            if let Some(data_home) = &cmd.data_home {
+                opts.data_home.clone_from(data_home);
+            }
+
+            if !cmd.store_key_prefix.is_empty() {
+                opts.store_key_prefix.clone_from(&cmd.store_key_prefix)
+            }
+
+            if let Some(max_txn_ops) = cmd.max_txn_ops {
+                opts.max_txn_ops = max_txn_ops;
+            }
+
+            // Disable dashboard in metasrv.
+            opts.http.disable_dashboard = true;
+
+            Ok(opts)
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing command",
+            }
+            .fail()
         }
+    }
 
-        if global_options.log_level.is_some() {
-            opts.logging.level.clone_from(&global_options.log_level);
-        }
-
-        opts.tracing = TracingOptions {
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: global_options.tokio_console_addr.clone(),
-        };
-
-        if let Some(addr) = &self.start_command.bind_addr {
-            opts.bind_addr.clone_from(addr);
-        }
-
-        if let Some(addr) = &self.start_command.server_addr {
-            opts.server_addr.clone_from(addr);
-        }
-
-        if let Some(addr) = &self.start_command.store_addrs {
-            opts.store_addrs.clone_from(addr);
-        }
-
-        if let Some(selector_type) = &self.start_command.selector {
-            opts.selector = selector_type[..]
-                .try_into()
-                .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-        }
-
-        if let Some(use_memory_store) = self.start_command.use_memory_store {
-            opts.use_memory_store = use_memory_store;
-        }
-
-        if let Some(enable_region_failover) = self.start_command.enable_region_failover {
-            opts.enable_region_failover = enable_region_failover;
-        }
-
-        if let Some(http_addr) = &self.start_command.http_addr {
-            opts.http.addr.clone_from(http_addr);
-        }
-
-        if let Some(http_timeout) = self.start_command.http_timeout {
-            opts.http.timeout = Duration::from_secs(http_timeout);
-        }
-
-        if let Some(data_home) = &self.start_command.data_home {
-            opts.data_home.clone_from(data_home);
-        }
-
-        if !self.start_command.store_key_prefix.is_empty() {
-            opts.store_key_prefix
-                .clone_from(&self.start_command.store_key_prefix)
-        }
-
-        if let Some(max_txn_ops) = self.start_command.max_txn_ops {
-            opts.max_txn_ops = max_txn_ops;
-        }
-
-        // Disable dashboard in metasrv.
-        opts.http.disable_dashboard = true;
-
-        Ok(opts)
+    pub fn get_options(&self) -> Option<MetasrvOptions> {
+        self.metasrv_options.clone()
     }
 }
 
@@ -257,25 +283,30 @@ mod tests {
 
     use super::*;
 
-    fn create_options_by_cmd(cmd: Command) -> Result<MetasrvOptions> {
-        let builder = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions::default())?;
-        Ok(builder.get_options())
+    fn create_options_by_cmd(
+        cmd: Command,
+        global_options: GlobalOptions,
+    ) -> Result<MetasrvOptions> {
+        let builder = cmd.new_app_builder(global_options).build_options()?;
+        Ok(builder.get_options().unwrap())
     }
 
     #[test]
     fn test_read_from_cmd() {
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                bind_addr: Some("127.0.0.1:3002".to_string()),
-                server_addr: Some("127.0.0.1:3002".to_string()),
-                store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
-                selector: Some("LoadBased".to_string()),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    bind_addr: Some("127.0.0.1:3002".to_string()),
+                    server_addr: Some("127.0.0.1:3002".to_string()),
+                    store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
+                    selector: Some("LoadBased".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
+
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!(vec!["127.0.0.1:2380".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LoadBased, options.selector);
@@ -303,12 +334,15 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                config_file: Some(file.path().to_str().unwrap().to_string()),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -344,27 +378,25 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = Command {
-            subcmd: SubCommand::Start(StartCommand {
-                bind_addr: Some("127.0.0.1:3002".to_string()),
-                server_addr: Some("127.0.0.1:3002".to_string()),
-                store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
-                selector: Some("LoadBased".to_string()),
-                ..Default::default()
-            }),
-        };
-
-        let options = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions {
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    bind_addr: Some("127.0.0.1:3002".to_string()),
+                    server_addr: Some("127.0.0.1:3002".to_string()),
+                    store_addrs: Some(vec!["127.0.0.1:2380".to_string()]),
+                    selector: Some("LoadBased".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
-            })
-            .unwrap()
-            .get_options();
+            },
+        )
+        .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -413,14 +445,17 @@ mod tests {
                 ),
             ],
             || {
-                let opts = create_options_by_cmd(Command {
-                    subcmd: SubCommand::Start(StartCommand {
-                        http_addr: Some("127.0.0.1:14000".to_string()),
-                        config_file: Some(file.path().to_str().unwrap().to_string()),
-                        env_prefix: env_prefix.to_string(),
-                        ..Default::default()
-                    }),
-                })
+                let opts = create_options_by_cmd(
+                    Command {
+                        subcmd: SubCommand::Start(StartCommand {
+                            http_addr: Some("127.0.0.1:14000".to_string()),
+                            config_file: Some(file.path().to_str().unwrap().to_string()),
+                            env_prefix: env_prefix.to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                    GlobalOptions::default(),
+                )
                 .unwrap();
 
                 // Should be read from env, env > default values.

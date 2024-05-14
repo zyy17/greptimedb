@@ -63,12 +63,13 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     BuildCacheRegistrySnafu, CacheRequiredSnafu, CreateDirSnafu, IllegalConfigSnafu,
-    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
+    InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu, LoadLayeredConfigSnafu,
+    MissingConfigSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
+    StartFrontendSnafu, StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::options::GlobalOptions;
-use crate::App;
+use crate::{App, AppBuilder};
 
 pub struct Instance {
     datanode: Datanode,
@@ -134,9 +135,9 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new_command_builder(self) -> StandaloneCommandBuilder {
+    pub fn new_app_builder(self, global_options: GlobalOptions) -> StandaloneAppBuilder {
         match self.subcmd {
-            SubCommand::Start(cmd) => StandaloneCommandBuilder::new().add_start_command(cmd),
+            SubCommand::Start(cmd) => StandaloneAppBuilder::new(cmd, global_options),
         }
     }
 }
@@ -272,171 +273,186 @@ pub struct StartCommand {
 }
 
 #[derive(Default)]
-pub struct StandaloneCommandBuilder {
-    standalone_options: StandaloneOptions,
-    start_command: StartCommand,
+pub struct StandaloneAppBuilder {
+    command: Option<StartCommand>,
+    global_options: GlobalOptions,
+    standalone_options: Option<StandaloneOptions>,
 }
 
-impl StandaloneCommandBuilder {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn add_start_command(mut self, start_command: StartCommand) -> Self {
-        self.start_command = start_command;
-        self
-    }
-
-    pub fn build_options(mut self, global_options: &GlobalOptions) -> Result<Self> {
-        self.standalone_options = self.merge_with_cli_options(
-            global_options,
-            StandaloneOptions::load_layered_options(
-                self.start_command.config_file.as_deref(),
-                self.start_command.env_prefix.as_ref(),
-            )
-            .context(LoadLayeredConfigSnafu)?,
-        )?;
-        Ok(self)
+#[async_trait]
+impl AppBuilder for StandaloneAppBuilder {
+    fn build_options(mut self) -> Result<Self> {
+        if let Some(cmd) = &self.command {
+            self.standalone_options = Some(
+                self.merge_with_cli_options(
+                    &self.global_options,
+                    StandaloneOptions::load_layered_options(
+                        cmd.config_file.as_deref(),
+                        cmd.env_prefix.as_ref(),
+                    )
+                    .context(LoadLayeredConfigSnafu)?,
+                )?,
+            );
+            Ok(self)
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing command",
+            }
+            .fail()
+        }
     }
 
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    pub async fn build_app(self) -> Result<Box<dyn App>> {
-        let _guard = common_telemetry::init_global_logging(
-            "greptime-standalone",
-            &self.standalone_options.logging,
-            &self.standalone_options.tracing,
-            None,
-        );
+    async fn build_app(self) -> Result<Box<dyn App>> {
+        if let Some(options) = self.standalone_options {
+            let _guard = common_telemetry::init_global_logging(
+                APP_NAME,
+                &options.logging,
+                &options.tracing,
+                None,
+            );
 
-        info!("Standalone start command: {:#?}", self.start_command);
-        info!("Standalone options: {:#?}", self.standalone_options);
+            info!("Standalone start command: {:#?}", self.command);
+            info!("Building standalone instance with {:?}", options);
 
-        let mut fe_opts = self.standalone_options.frontend_options();
-        #[allow(clippy::unnecessary_mut_passed)]
-        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
-            .await
-            .context(StartFrontendSnafu)?;
+            let mut fe_opts = options.frontend_options();
+            #[allow(clippy::unnecessary_mut_passed)]
+            let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
+                .await
+                .context(StartFrontendSnafu)?;
 
-        let dn_opts = self.standalone_options.datanode_options();
+            let dn_opts = options.datanode_options();
 
-        set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+            set_default_timezone(fe_opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
 
-        let data_home = &dn_opts.storage.data_home;
-        // Ensure the data_home directory exists.
-        fs::create_dir_all(path::Path::new(data_home))
-            .context(CreateDirSnafu { dir: data_home })?;
+            let data_home = &dn_opts.storage.data_home;
+            // Ensure the data_home directory exists.
+            fs::create_dir_all(path::Path::new(data_home))
+                .context(CreateDirSnafu { dir: data_home })?;
 
-        let metadata_dir = metadata_store_dir(data_home);
-        let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
-            metadata_dir,
-            self.standalone_options.metadata_store.clone(),
-            self.standalone_options.procedure.clone(),
-        )
-        .await
-        .context(StartFrontendSnafu)?;
-
-        // Builds cache registry
-        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
-        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
-        let layered_cache_registry = Arc::new(
-            with_default_composite_cache_registry(
-                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            let metadata_dir = metadata_store_dir(data_home);
+            let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
+                metadata_dir,
+                options.metadata_store.clone(),
+                options.procedure.clone(),
             )
-            .context(BuildCacheRegistrySnafu)?
-            .build(),
-        );
-
-        let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_CACHE_NAME,
-        })?;
-        let table_route_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
-            name: TABLE_ROUTE_CACHE_NAME,
-        })?;
-        let catalog_manager = KvBackendCatalogManager::new(
-            dn_opts.mode,
-            None,
-            kv_backend.clone(),
-            table_cache,
-            table_route_cache,
-        )
-        .await;
-
-        let builder =
-            DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
-        let datanode = builder.build().await.context(StartDatanodeSnafu)?;
-
-        let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
-
-        let table_id_sequence = Arc::new(
-            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_TABLE_ID as u64)
-                .step(10)
-                .build(),
-        );
-        let flow_id_sequence = Arc::new(
-            SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
-                .initial(MIN_USER_FLOW_ID as u64)
-                .step(10)
-                .build(),
-        );
-        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            self.standalone_options.wal.into(),
-            kv_backend.clone(),
-        ));
-        let table_metadata_manager =
-            Self::create_table_metadata_manager(kv_backend.clone()).await?;
-        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
-            table_id_sequence,
-            wal_options_allocator.clone(),
-        ));
-        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
-            flow_id_sequence,
-        ));
-
-        let ddl_task_executor = Self::create_ddl_task_executor(
-            procedure_manager.clone(),
-            node_manager.clone(),
-            layered_cache_registry.clone(),
-            table_metadata_manager,
-            table_meta_allocator,
-            flow_metadata_manager,
-            flow_meta_allocator,
-        )
-        .await?;
-
-        let mut frontend = FrontendBuilder::new(
-            kv_backend,
-            layered_cache_registry,
-            catalog_manager,
-            node_manager,
-            ddl_task_executor,
-        )
-        .with_plugin(fe_plugins.clone())
-        .try_build()
-        .await
-        .context(StartFrontendSnafu)?;
-
-        let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
-            .build()
             .await
             .context(StartFrontendSnafu)?;
-        frontend
-            .build_servers(fe_opts, servers)
+
+            // Builds cache registry
+            let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+            let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
+            let layered_cache_registry = Arc::new(
+                with_default_composite_cache_registry(
+                    layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+                )
+                .context(BuildCacheRegistrySnafu)?
+                .build(),
+            );
+
+            let table_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: TABLE_CACHE_NAME,
+            })?;
+            let table_route_cache = layered_cache_registry.get().context(CacheRequiredSnafu {
+                name: TABLE_ROUTE_CACHE_NAME,
+            })?;
+            let catalog_manager = KvBackendCatalogManager::new(
+                dn_opts.mode,
+                None,
+                kv_backend.clone(),
+                table_cache,
+                table_route_cache,
+            )
+            .await;
+
+            let builder = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
+                .with_kv_backend(kv_backend.clone());
+            let datanode = builder.build().await.context(StartDatanodeSnafu)?;
+
+            let node_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+
+            let table_id_sequence = Arc::new(
+                SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_TABLE_ID as u64)
+                    .step(10)
+                    .build(),
+            );
+            let flow_id_sequence = Arc::new(
+                SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_FLOW_ID as u64)
+                    .step(10)
+                    .build(),
+            );
+            let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+                options.wal.into(),
+                kv_backend.clone(),
+            ));
+            let table_metadata_manager =
+                Self::create_table_metadata_manager(kv_backend.clone()).await?;
+            let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+            let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+                table_id_sequence,
+                wal_options_allocator.clone(),
+            ));
+            let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+                flow_id_sequence,
+            ));
+
+            let ddl_task_executor = Self::create_ddl_task_executor(
+                procedure_manager.clone(),
+                node_manager.clone(),
+                layered_cache_registry.clone(),
+                table_metadata_manager,
+                table_meta_allocator,
+                flow_metadata_manager,
+                flow_meta_allocator,
+            )
+            .await?;
+
+            let mut frontend = FrontendBuilder::new(
+                kv_backend,
+                layered_cache_registry,
+                catalog_manager,
+                node_manager,
+                ddl_task_executor,
+            )
+            .with_plugin(fe_plugins.clone())
+            .try_build()
+            .await
             .context(StartFrontendSnafu)?;
 
-        Ok(Box::new(Instance {
-            datanode,
-            frontend,
-            procedure_manager,
-            wal_options_allocator,
-        }))
-    }
+            let servers = Services::new(fe_opts.clone(), Arc::new(frontend.clone()), fe_plugins)
+                .build()
+                .await
+                .context(StartFrontendSnafu)?;
+            frontend
+                .build_servers(fe_opts, servers)
+                .context(StartFrontendSnafu)?;
 
-    pub fn get_options(&self) -> StandaloneOptions {
-        self.standalone_options.clone()
+            Ok(Box::new(Instance {
+                datanode,
+                frontend,
+                procedure_manager,
+                wal_options_allocator,
+            }))
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing options",
+            }
+            .fail()
+        }
+    }
+}
+
+impl StandaloneAppBuilder {
+    fn new(cmd: StartCommand, global_options: GlobalOptions) -> Self {
+        StandaloneAppBuilder {
+            command: Some(cmd),
+            global_options,
+            ..Default::default()
+        }
     }
 
     // The precedence order is: cli > config file > environment variables > default values.
@@ -445,69 +461,79 @@ impl StandaloneCommandBuilder {
         global_options: &GlobalOptions,
         mut opts: StandaloneOptions,
     ) -> Result<StandaloneOptions> {
-        // Should always be standalone mode.
-        opts.mode = Mode::Standalone;
+        if let Some(cmd) = &self.command {
+            // Should always be standalone mode.
+            opts.mode = Mode::Standalone;
 
-        if let Some(dir) = &global_options.log_dir {
-            opts.logging.dir.clone_from(dir);
-        }
-
-        if global_options.log_level.is_some() {
-            opts.logging.level.clone_from(&global_options.log_level);
-        }
-
-        opts.tracing = TracingOptions {
-            #[cfg(feature = "tokio-console")]
-            tokio_console_addr: global_options.tokio_console_addr.clone(),
-        };
-
-        let tls_opts = TlsOption::new(
-            self.start_command.tls_mode.clone(),
-            self.start_command.tls_cert_path.clone(),
-            self.start_command.tls_key_path.clone(),
-        );
-
-        if let Some(addr) = &self.start_command.http_addr {
-            opts.http.addr.clone_from(addr);
-        }
-
-        if let Some(data_home) = &self.start_command.data_home {
-            opts.storage.data_home.clone_from(data_home);
-        }
-
-        if let Some(addr) = &self.start_command.rpc_addr {
-            // frontend grpc addr conflict with datanode default grpc addr
-            let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
-            if addr.eq(&datanode_grpc_addr) {
-                return IllegalConfigSnafu {
-                    msg: format!(
-                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
-                    ),
-                }.fail();
+            if let Some(dir) = &global_options.log_dir {
+                opts.logging.dir.clone_from(dir);
             }
-            opts.grpc.addr.clone_from(addr)
+
+            if global_options.log_level.is_some() {
+                opts.logging.level.clone_from(&global_options.log_level);
+            }
+
+            opts.tracing = TracingOptions {
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: global_options.tokio_console_addr.clone(),
+            };
+
+            let tls_opts = TlsOption::new(
+                cmd.tls_mode.clone(),
+                cmd.tls_cert_path.clone(),
+                cmd.tls_key_path.clone(),
+            );
+
+            if let Some(addr) = &cmd.http_addr {
+                opts.http.addr.clone_from(addr);
+            }
+
+            if let Some(data_home) = &cmd.data_home {
+                opts.storage.data_home.clone_from(data_home);
+            }
+
+            if let Some(addr) = &cmd.rpc_addr {
+                // frontend grpc addr conflict with datanode default grpc addr
+                let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
+                if addr.eq(&datanode_grpc_addr) {
+                    return IllegalConfigSnafu {
+                        msg: format!(
+                            "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
+                        ),
+                    }.fail();
+                }
+                opts.grpc.addr.clone_from(addr)
+            }
+
+            if let Some(addr) = &cmd.mysql_addr {
+                opts.mysql.enable = true;
+                opts.mysql.addr.clone_from(addr);
+                opts.mysql.tls = tls_opts.clone();
+            }
+
+            if let Some(addr) = &cmd.postgres_addr {
+                opts.postgres.enable = true;
+                opts.postgres.addr.clone_from(addr);
+                opts.postgres.tls = tls_opts;
+            }
+
+            if cmd.influxdb_enable {
+                opts.influxdb.enable = cmd.influxdb_enable;
+            }
+
+            opts.user_provider.clone_from(&cmd.user_provider);
+
+            Ok(opts)
+        } else {
+            MissingConfigSnafu {
+                msg: "Missing command",
+            }
+            .fail()
         }
+    }
 
-        if let Some(addr) = &self.start_command.mysql_addr {
-            opts.mysql.enable = true;
-            opts.mysql.addr.clone_from(addr);
-            opts.mysql.tls = tls_opts.clone();
-        }
-
-        if let Some(addr) = &self.start_command.postgres_addr {
-            opts.postgres.enable = true;
-            opts.postgres.addr.clone_from(addr);
-            opts.postgres.tls = tls_opts;
-        }
-
-        if self.start_command.influxdb_enable {
-            opts.influxdb.enable = self.start_command.influxdb_enable;
-        }
-
-        opts.user_provider
-            .clone_from(&self.start_command.user_provider);
-
-        Ok(opts)
+    pub fn get_options(&self) -> Option<StandaloneOptions> {
+        self.standalone_options.clone()
     }
 
     pub async fn create_ddl_task_executor(
@@ -570,11 +596,12 @@ mod tests {
     use super::*;
     use crate::options::GlobalOptions;
 
-    fn create_options_by_cmd(cmd: Command) -> Result<StandaloneOptions> {
-        let builder = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions::default())?;
-        Ok(builder.get_options())
+    fn create_options_by_cmd(
+        cmd: Command,
+        global_options: GlobalOptions,
+    ) -> Result<StandaloneOptions> {
+        let builder = cmd.new_app_builder(global_options).build_options()?;
+        Ok(builder.get_options().unwrap())
     }
 
     #[tokio::test]
@@ -658,13 +685,16 @@ mod tests {
         "#;
         write!(file, "{}", toml_str).unwrap();
 
-        let options = create_options_by_cmd(Command {
-            subcmd: SubCommand::Start(StartCommand {
-                config_file: Some(file.path().to_str().unwrap().to_string()),
-                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-                ..Default::default()
-            }),
-        })
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions::default(),
+        )
         .unwrap();
 
         let fe_opts = options.frontend_options();
@@ -714,24 +744,22 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = Command {
-            subcmd: SubCommand::Start(StartCommand {
-                user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-                ..Default::default()
-            }),
-        };
-
-        let options = cmd
-            .new_command_builder()
-            .build_options(&GlobalOptions {
+        let options = create_options_by_cmd(
+            Command {
+                subcmd: SubCommand::Start(StartCommand {
+                    user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+                    ..Default::default()
+                }),
+            },
+            GlobalOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
                 tokio_console_addr: None,
-            })
-            .unwrap()
-            .get_options();
+            },
+        )
+        .unwrap();
 
         assert_eq!("/tmp/greptimedb/test/logs", options.logging.dir);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -786,14 +814,17 @@ mod tests {
                 ),
             ],
             || {
-                let opts = create_options_by_cmd(Command {
-                    subcmd: SubCommand::Start(StartCommand {
-                        config_file: Some(file.path().to_str().unwrap().to_string()),
-                        http_addr: Some("127.0.0.1:14000".to_string()),
-                        env_prefix: env_prefix.to_string(),
-                        ..Default::default()
-                    }),
-                })
+                let opts = create_options_by_cmd(
+                    Command {
+                        subcmd: SubCommand::Start(StartCommand {
+                            config_file: Some(file.path().to_str().unwrap().to_string()),
+                            http_addr: Some("127.0.0.1:14000".to_string()),
+                            env_prefix: env_prefix.to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                    GlobalOptions::default(),
+                )
                 .unwrap();
 
                 // Should be read from env, env > default values.
