@@ -125,58 +125,69 @@ pub struct MetasrvAppBuilder {
 #[async_trait]
 impl AppBuilder for MetasrvAppBuilder {
     fn build_options(mut self) -> Result<Self> {
-        if let Some(cmd) = &self.command {
-            self.metasrv_options = Some(
-                self.merge_with_cli_options(
-                    &self.global_options,
-                    MetasrvOptions::load_layered_options(
-                        cmd.config_file.as_deref(),
-                        cmd.env_prefix.as_ref(),
-                    )
-                    .context(LoadLayeredConfigSnafu)?,
-                )?,
-            );
-            Ok(self)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
+                }
             }
-            .fail()
-        }
+        };
+
+        self.metasrv_options = Some(
+            self.merge_with_cli_options(
+                &self.global_options,
+                MetasrvOptions::load_layered_options(
+                    cmd.config_file.as_deref(),
+                    cmd.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        );
+
+        Ok(self)
     }
 
     async fn build_app(self) -> Result<Box<dyn App>> {
-        if let Some(mut options) = self.metasrv_options {
-            let _guard = common_telemetry::init_global_logging(
-                APP_NAME,
-                &options.logging,
-                &options.tracing,
-                None,
-            );
-
-            let plugins = plugins::setup_metasrv_plugins(&mut options)
-                .await
-                .context(StartMetaServerSnafu)?;
-
-            info!("Metasrv start command: {:#?}", self.command);
-            info!("Metasrv options: {:#?}", options);
-
-            let builder = meta_srv::bootstrap::metasrv_builder(&options, plugins.clone(), None)
-                .await
-                .context(error::BuildMetaServerSnafu)?;
-            let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
-
-            let instance = MetasrvInstance::new(options, plugins, metasrv)
-                .await
-                .context(error::BuildMetaServerSnafu)?;
-
-            Ok(Box::new(Instance::new(instance)))
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing options",
+        let mut options = {
+            match self.metasrv_options {
+                Some(opts) => opts,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing options",
+                    }
+                    .fail();
+                }
             }
-            .fail()
-        }
+        };
+
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &options.logging,
+            &options.tracing,
+            None,
+        );
+
+        let plugins = plugins::setup_metasrv_plugins(&mut options)
+            .await
+            .context(StartMetaServerSnafu)?;
+
+        info!("Metasrv start command: {:#?}", self.command);
+        info!("Metasrv options: {:#?}", options);
+
+        let builder = meta_srv::bootstrap::metasrv_builder(&options, plugins.clone(), None)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        let instance = MetasrvInstance::new(options, plugins, metasrv)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+
+        Ok(Box::new(Instance::new(instance)))
     }
 }
 
@@ -195,76 +206,81 @@ impl MetasrvAppBuilder {
         global_options: &GlobalOptions,
         mut opts: MetasrvOptions,
     ) -> Result<MetasrvOptions> {
-        if let Some(cmd) = &self.command {
-            if let Some(dir) = &global_options.log_dir {
-                opts.logging.dir.clone_from(dir);
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
+                }
             }
+        };
 
-            if global_options.log_level.is_some() {
-                opts.logging.level.clone_from(&global_options.log_level);
-            }
-
-            opts.tracing = TracingOptions {
-                #[cfg(feature = "tokio-console")]
-                tokio_console_addr: global_options.tokio_console_addr.clone(),
-            };
-
-            if let Some(addr) = &cmd.bind_addr {
-                opts.bind_addr.clone_from(addr);
-            }
-
-            if let Some(addr) = &cmd.server_addr {
-                opts.server_addr.clone_from(addr);
-            }
-
-            if let Some(addr) = &cmd.store_addrs {
-                opts.store_addrs.clone_from(addr);
-            }
-
-            if let Some(selector_type) = &cmd.selector {
-                opts.selector = selector_type[..]
-                    .try_into()
-                    .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
-            }
-
-            if let Some(use_memory_store) = cmd.use_memory_store {
-                opts.use_memory_store = use_memory_store;
-            }
-
-            if let Some(enable_region_failover) = cmd.enable_region_failover {
-                opts.enable_region_failover = enable_region_failover;
-            }
-
-            if let Some(http_addr) = &cmd.http_addr {
-                opts.http.addr.clone_from(http_addr);
-            }
-
-            if let Some(http_timeout) = cmd.http_timeout {
-                opts.http.timeout = Duration::from_secs(http_timeout);
-            }
-
-            if let Some(data_home) = &cmd.data_home {
-                opts.data_home.clone_from(data_home);
-            }
-
-            if !cmd.store_key_prefix.is_empty() {
-                opts.store_key_prefix.clone_from(&cmd.store_key_prefix)
-            }
-
-            if let Some(max_txn_ops) = cmd.max_txn_ops {
-                opts.max_txn_ops = max_txn_ops;
-            }
-
-            // Disable dashboard in metasrv.
-            opts.http.disable_dashboard = true;
-
-            Ok(opts)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
-            }
-            .fail()
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
         }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        if let Some(addr) = &cmd.bind_addr {
+            opts.bind_addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &cmd.server_addr {
+            opts.server_addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &cmd.store_addrs {
+            opts.store_addrs.clone_from(addr);
+        }
+
+        if let Some(selector_type) = &cmd.selector {
+            opts.selector = selector_type[..]
+                .try_into()
+                .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
+        }
+
+        if let Some(use_memory_store) = cmd.use_memory_store {
+            opts.use_memory_store = use_memory_store;
+        }
+
+        if let Some(enable_region_failover) = cmd.enable_region_failover {
+            opts.enable_region_failover = enable_region_failover;
+        }
+
+        if let Some(http_addr) = &cmd.http_addr {
+            opts.http.addr.clone_from(http_addr);
+        }
+
+        if let Some(http_timeout) = cmd.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout);
+        }
+
+        if let Some(data_home) = &cmd.data_home {
+            opts.data_home.clone_from(data_home);
+        }
+
+        if !cmd.store_key_prefix.is_empty() {
+            opts.store_key_prefix.clone_from(&cmd.store_key_prefix)
+        }
+
+        if let Some(max_txn_ops) = cmd.max_txn_ops {
+            opts.max_txn_ops = max_txn_ops;
+        }
+
+        // Disable dashboard in metasrv.
+        opts.http.disable_dashboard = true;
+
+        Ok(opts)
     }
 
     pub fn get_options(&self) -> Option<MetasrvOptions> {

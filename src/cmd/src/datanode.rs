@@ -122,80 +122,91 @@ pub struct DatanodeAppBuilder {
 #[async_trait]
 impl AppBuilder for DatanodeAppBuilder {
     fn build_options(mut self) -> Result<Self> {
-        if let Some(cmd) = &self.command {
-            self.datanode_options = Some(
-                self.merge_with_cli_options(
-                    &self.global_options,
-                    DatanodeOptions::load_layered_options(
-                        cmd.config_file.as_deref(),
-                        cmd.env_prefix.as_ref(),
-                    )
-                    .context(LoadLayeredConfigSnafu)?,
-                )?,
-            );
-            Ok(self)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
+                }
             }
-            .fail()
-        }
+        };
+
+        self.datanode_options = Some(
+            self.merge_with_cli_options(
+                &self.global_options,
+                DatanodeOptions::load_layered_options(
+                    cmd.config_file.as_deref(),
+                    cmd.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        );
+
+        Ok(self)
     }
 
     async fn build_app(mut self) -> Result<Box<dyn App>> {
-        if let Some(mut options) = self.datanode_options {
-            let _guard = common_telemetry::init_global_logging(
-                APP_NAME,
-                &options.logging,
-                &options.tracing,
-                options.node_id.map(|x| x.to_string()),
-            );
-
-            let plugins = plugins::setup_datanode_plugins(&mut options)
-                .await
-                .context(StartDatanodeSnafu)?;
-
-            info!("Datanode start command: {:#?}", self.command);
-            info!("Datanode options: {:#?}", options);
-
-            let node_id = options
-                .node_id
-                .context(MissingConfigSnafu { msg: "'node_id'" })?;
-
-            let meta_config = options.meta_client.as_ref().context(MissingConfigSnafu {
-                msg: "'meta_client_options'",
-            })?;
-
-            let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
-                .await
-                .context(StartDatanodeSnafu)?;
-
-            let meta_backend = Arc::new(MetaKvBackend {
-                client: Arc::new(meta_client.clone()),
-            });
-
-            let mut datanode = DatanodeBuilder::new(options.clone(), plugins)
-                .with_meta_client(meta_client)
-                .with_kv_backend(meta_backend)
-                .build()
-                .await
-                .context(StartDatanodeSnafu)?;
-
-            let services = DatanodeServiceBuilder::new(&options)
-                .with_default_grpc_server(&datanode.region_server())
-                .enable_http_service()
-                .build()
-                .await
-                .context(StartDatanodeSnafu)?;
-            datanode.setup_services(services);
-
-            Ok(Box::new(Instance::new(datanode)))
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing options",
+        let mut options = {
+            match self.datanode_options {
+                Some(opts) => opts,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing options",
+                    }
+                    .fail();
+                }
             }
-            .fail()
-        }
+        };
+
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &options.logging,
+            &options.tracing,
+            options.node_id.map(|x| x.to_string()),
+        );
+
+        let plugins = plugins::setup_datanode_plugins(&mut options)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        info!("Datanode start command: {:#?}", self.command);
+        info!("Datanode options: {:#?}", options);
+
+        let node_id = options
+            .node_id
+            .context(MissingConfigSnafu { msg: "'node_id'" })?;
+
+        let meta_config = options.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client_options'",
+        })?;
+
+        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let mut datanode = DatanodeBuilder::new(options.clone(), plugins)
+            .with_meta_client(meta_client)
+            .with_kv_backend(meta_backend)
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let services = DatanodeServiceBuilder::new(&options)
+            .with_default_grpc_server(&datanode.region_server())
+            .enable_http_service()
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+        datanode.setup_services(services);
+
+        Ok(Box::new(Instance::new(datanode)))
     }
 }
 
@@ -214,83 +225,88 @@ impl DatanodeAppBuilder {
         global_options: &GlobalOptions,
         mut opts: DatanodeOptions,
     ) -> Result<DatanodeOptions> {
-        if let Some(cmd) = &self.command {
-            if let Some(dir) = &global_options.log_dir {
-                opts.logging.dir.clone_from(dir);
-            }
-
-            if global_options.log_level.is_some() {
-                opts.logging.level.clone_from(&global_options.log_level);
-            }
-
-            opts.tracing = TracingOptions {
-                #[cfg(feature = "tokio-console")]
-                tokio_console_addr: global_options.tokio_console_addr.clone(),
-            };
-
-            if let Some(addr) = &cmd.rpc_addr {
-                opts.rpc_addr.clone_from(addr);
-            }
-
-            if cmd.rpc_hostname.is_some() {
-                opts.rpc_hostname.clone_from(&cmd.rpc_hostname);
-            }
-
-            if let Some(node_id) = cmd.node_id {
-                opts.node_id = Some(node_id);
-            }
-
-            if let Some(metasrv_addrs) = &cmd.metasrv_addrs {
-                opts.meta_client
-                    .get_or_insert_with(MetaClientOptions::default)
-                    .metasrv_addrs
-                    .clone_from(metasrv_addrs);
-                opts.mode = Mode::Distributed;
-            }
-
-            if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
-                return MissingConfigSnafu {
-                    msg: "Missing node id option",
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
                 }
-                .fail();
             }
+        };
 
-            if let Some(data_home) = &cmd.data_home {
-                opts.storage.data_home.clone_from(data_home);
-            }
-
-            // `wal_dir` only affects raft-engine config.
-            if let Some(wal_dir) = &cmd.wal_dir
-                && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
-            {
-                if raft_engine_config
-                    .dir
-                    .as_ref()
-                    .is_some_and(|original_dir| original_dir != wal_dir)
-                {
-                    info!("The wal dir of raft-engine is altered to {wal_dir}");
-                }
-                raft_engine_config.dir.replace(wal_dir.clone());
-            }
-
-            if let Some(http_addr) = &cmd.http_addr {
-                opts.http.addr.clone_from(http_addr);
-            }
-
-            if let Some(http_timeout) = cmd.http_timeout {
-                opts.http.timeout = Duration::from_secs(http_timeout)
-            }
-
-            // Disable dashboard in datanode.
-            opts.http.disable_dashboard = true;
-
-            Ok(opts)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
-            }
-            .fail()
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
         }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        if let Some(addr) = &cmd.rpc_addr {
+            opts.rpc_addr.clone_from(addr);
+        }
+
+        if cmd.rpc_hostname.is_some() {
+            opts.rpc_hostname.clone_from(&cmd.rpc_hostname);
+        }
+
+        if let Some(node_id) = cmd.node_id {
+            opts.node_id = Some(node_id);
+        }
+
+        if let Some(metasrv_addrs) = &cmd.metasrv_addrs {
+            opts.meta_client
+                .get_or_insert_with(MetaClientOptions::default)
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
+            opts.mode = Mode::Distributed;
+        }
+
+        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
+            return MissingConfigSnafu {
+                msg: "Missing node id option",
+            }
+            .fail();
+        }
+
+        if let Some(data_home) = &cmd.data_home {
+            opts.storage.data_home.clone_from(data_home);
+        }
+
+        // `wal_dir` only affects raft-engine config.
+        if let Some(wal_dir) = &cmd.wal_dir
+            && let DatanodeWalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
+        {
+            if raft_engine_config
+                .dir
+                .as_ref()
+                .is_some_and(|original_dir| original_dir != wal_dir)
+            {
+                info!("The wal dir of raft-engine is altered to {wal_dir}");
+            }
+            raft_engine_config.dir.replace(wal_dir.clone());
+        }
+
+        if let Some(http_addr) = &cmd.http_addr {
+            opts.http.addr.clone_from(http_addr);
+        }
+
+        if let Some(http_timeout) = cmd.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout)
+        }
+
+        // Disable dashboard in datanode.
+        opts.http.disable_dashboard = true;
+
+        Ok(opts)
     }
 
     pub fn get_options(&self) -> Option<DatanodeOptions> {

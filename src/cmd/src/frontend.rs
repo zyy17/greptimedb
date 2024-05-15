@@ -142,143 +142,154 @@ pub struct FrontendAppBuilder {
 #[async_trait]
 impl AppBuilder for FrontendAppBuilder {
     fn build_options(mut self) -> Result<Self> {
-        if let Some(cmd) = &self.command {
-            self.frontend_options = Some(
-                self.merge_with_cli_options(
-                    &self.global_options,
-                    FrontendOptions::load_layered_options(
-                        cmd.config_file.as_deref(),
-                        cmd.env_prefix.as_ref(),
-                    )
-                    .context(LoadLayeredConfigSnafu)?,
-                )?,
-            );
-            Ok(self)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
+                }
             }
-            .fail()
-        }
+        };
+
+        self.frontend_options = Some(
+            self.merge_with_cli_options(
+                &self.global_options,
+                FrontendOptions::load_layered_options(
+                    cmd.config_file.as_deref(),
+                    cmd.env_prefix.as_ref(),
+                )
+                .context(LoadLayeredConfigSnafu)?,
+            )?,
+        );
+
+        Ok(self)
     }
 
     async fn build_app(self) -> Result<Box<dyn App>> {
-        if let Some(mut options) = self.frontend_options {
-            let _guard = common_telemetry::init_global_logging(
-                APP_NAME,
-                &options.logging,
-                &options.tracing,
-                options.node_id.clone(),
-            );
+        let mut options = {
+            match self.frontend_options {
+                Some(opts) => opts,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing options",
+                    }
+                    .fail();
+                }
+            }
+        };
 
-            #[allow(clippy::unnecessary_mut_passed)]
-            let plugins = plugins::setup_frontend_plugins(&mut options)
-                .await
-                .context(StartFrontendSnafu)?;
+        let _guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &options.logging,
+            &options.tracing,
+            options.node_id.clone(),
+        );
 
-            info!("Frontend start command: {:#?}", self.command);
-            info!("Frontend options: {:#?}", options);
-
-            set_default_timezone(options.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
-
-            let meta_client_options = options.meta_client.as_ref().context(MissingConfigSnafu {
-                msg: "'meta_client'",
-            })?;
-
-            let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
-            let cache_ttl = meta_client_options.metadata_cache_ttl;
-            let cache_tti = meta_client_options.metadata_cache_tti;
-
-            let meta_client = FeInstance::create_meta_client(meta_client_options)
-                .await
-                .context(StartFrontendSnafu)?;
-
-            let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
-                .cache_max_capacity(cache_max_capacity)
-                .cache_ttl(cache_ttl)
-                .cache_tti(cache_tti)
-                .build();
-            let cached_meta_backend = Arc::new(cached_meta_backend);
-
-            // Builds cache registry
-            let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
-                CacheRegistryBuilder::default()
-                    .add_cache(cached_meta_backend.clone())
-                    .build(),
-            );
-            let fundamental_cache_registry =
-                build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
-            let layered_cache_registry = Arc::new(
-                with_default_composite_cache_registry(
-                    layered_cache_builder.add_cache_registry(fundamental_cache_registry),
-                )
-                .context(error::BuildCacheRegistrySnafu)?
-                .build(),
-            );
-
-            let table_cache = layered_cache_registry
-                .get()
-                .context(error::CacheRequiredSnafu {
-                    name: TABLE_CACHE_NAME,
-                })?;
-            let table_route_cache =
-                layered_cache_registry
-                    .get()
-                    .context(error::CacheRequiredSnafu {
-                        name: TABLE_ROUTE_CACHE_NAME,
-                    })?;
-            let catalog_manager = KvBackendCatalogManager::new(
-                options.mode,
-                Some(meta_client.clone()),
-                cached_meta_backend.clone(),
-                table_cache,
-                table_route_cache,
-            )
-            .await;
-
-            let executor = HandlerGroupExecutor::new(vec![
-                Arc::new(ParseMailboxMessageHandler),
-                Arc::new(InvalidateTableCacheHandler::new(
-                    layered_cache_registry.clone(),
-                )),
-            ]);
-
-            let heartbeat_task = HeartbeatTask::new(
-                &options,
-                meta_client.clone(),
-                options.heartbeat.clone(),
-                Arc::new(executor),
-            );
-
-            let mut instance = FrontendBuilder::new(
-                cached_meta_backend.clone(),
-                layered_cache_registry.clone(),
-                catalog_manager,
-                Arc::new(DatanodeClients::default()),
-                meta_client,
-            )
-            .with_plugin(plugins.clone())
-            .with_local_cache_invalidator(layered_cache_registry)
-            .with_heartbeat_task(heartbeat_task)
-            .try_build()
+        #[allow(clippy::unnecessary_mut_passed)]
+        let plugins = plugins::setup_frontend_plugins(&mut options)
             .await
             .context(StartFrontendSnafu)?;
 
-            let servers = Services::new(options.clone(), Arc::new(instance.clone()), plugins)
-                .build()
-                .await
-                .context(StartFrontendSnafu)?;
-            instance
-                .build_servers(options, servers)
-                .context(StartFrontendSnafu)?;
+        info!("Frontend start command: {:#?}", self.command);
+        info!("Frontend options: {:#?}", options);
 
-            Ok(Box::new(Instance::new(instance)))
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing options",
-            }
-            .fail()
-        }
+        set_default_timezone(options.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+
+        let meta_client_options = options.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client'",
+        })?;
+
+        let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
+        let cache_ttl = meta_client_options.metadata_cache_ttl;
+        let cache_tti = meta_client_options.metadata_cache_tti;
+
+        let meta_client = FeInstance::create_meta_client(meta_client_options)
+            .await
+            .context(StartFrontendSnafu)?;
+
+        let cached_meta_backend = CachedMetaKvBackendBuilder::new(meta_client.clone())
+            .cache_max_capacity(cache_max_capacity)
+            .cache_ttl(cache_ttl)
+            .cache_tti(cache_tti)
+            .build();
+        let cached_meta_backend = Arc::new(cached_meta_backend);
+
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
+            CacheRegistryBuilder::default()
+                .add_cache(cached_meta_backend.clone())
+                .build(),
+        );
+        let fundamental_cache_registry =
+            build_fundamental_cache_registry(Arc::new(MetaKvBackend::new(meta_client.clone())));
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .context(error::BuildCacheRegistrySnafu)?
+            .build(),
+        );
+
+        let table_cache = layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: TABLE_CACHE_NAME,
+            })?;
+        let table_route_cache =
+            layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_ROUTE_CACHE_NAME,
+                })?;
+        let catalog_manager = KvBackendCatalogManager::new(
+            options.mode,
+            Some(meta_client.clone()),
+            cached_meta_backend.clone(),
+            table_cache,
+            table_route_cache,
+        )
+        .await;
+
+        let executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateTableCacheHandler::new(
+                layered_cache_registry.clone(),
+            )),
+        ]);
+
+        let heartbeat_task = HeartbeatTask::new(
+            &options,
+            meta_client.clone(),
+            options.heartbeat.clone(),
+            Arc::new(executor),
+        );
+
+        let mut instance = FrontendBuilder::new(
+            cached_meta_backend.clone(),
+            layered_cache_registry.clone(),
+            catalog_manager,
+            Arc::new(DatanodeClients::default()),
+            meta_client,
+        )
+        .with_plugin(plugins.clone())
+        .with_local_cache_invalidator(layered_cache_registry)
+        .with_heartbeat_task(heartbeat_task)
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
+
+        let servers = Services::new(options.clone(), Arc::new(instance.clone()), plugins)
+            .build()
+            .await
+            .context(StartFrontendSnafu)?;
+        instance
+            .build_servers(options, servers)
+            .context(StartFrontendSnafu)?;
+
+        Ok(Box::new(Instance::new(instance)))
     }
 }
 
@@ -297,75 +308,80 @@ impl FrontendAppBuilder {
         global_options: &GlobalOptions,
         mut opts: FrontendOptions,
     ) -> Result<FrontendOptions> {
-        if let Some(cmd) = &self.command {
-            if let Some(dir) = &global_options.log_dir {
-                opts.logging.dir.clone_from(dir);
+        let cmd = {
+            match &self.command {
+                Some(cmd) => cmd,
+                None => {
+                    return MissingConfigSnafu {
+                        msg: "Missing command",
+                    }
+                    .fail();
+                }
             }
+        };
 
-            if global_options.log_level.is_some() {
-                opts.logging.level.clone_from(&global_options.log_level);
-            }
-
-            opts.tracing = TracingOptions {
-                #[cfg(feature = "tokio-console")]
-                tokio_console_addr: global_options.tokio_console_addr.clone(),
-            };
-
-            let tls_opts = TlsOption::new(
-                cmd.tls_mode.clone(),
-                cmd.tls_cert_path.clone(),
-                cmd.tls_key_path.clone(),
-            );
-
-            if let Some(addr) = &cmd.http_addr {
-                opts.http.addr.clone_from(addr);
-            }
-
-            if let Some(http_timeout) = cmd.http_timeout {
-                opts.http.timeout = Duration::from_secs(http_timeout)
-            }
-
-            if let Some(disable_dashboard) = cmd.disable_dashboard {
-                opts.http.disable_dashboard = disable_dashboard;
-            }
-
-            if let Some(addr) = &cmd.rpc_addr {
-                opts.grpc.addr.clone_from(addr);
-            }
-
-            if let Some(addr) = &cmd.mysql_addr {
-                opts.mysql.enable = true;
-                opts.mysql.addr.clone_from(addr);
-                opts.mysql.tls = tls_opts.clone();
-            }
-
-            if let Some(addr) = &cmd.postgres_addr {
-                opts.postgres.enable = true;
-                opts.postgres.addr.clone_from(addr);
-                opts.postgres.tls = tls_opts;
-            }
-
-            if let Some(enable) = cmd.influxdb_enable {
-                opts.influxdb.enable = enable;
-            }
-
-            if let Some(metasrv_addrs) = &cmd.metasrv_addrs {
-                opts.meta_client
-                    .get_or_insert_with(MetaClientOptions::default)
-                    .metasrv_addrs
-                    .clone_from(metasrv_addrs);
-                opts.mode = Mode::Distributed;
-            }
-
-            opts.user_provider.clone_from(&cmd.user_provider);
-
-            Ok(opts)
-        } else {
-            MissingConfigSnafu {
-                msg: "Missing command",
-            }
-            .fail()
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
         }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        let tls_opts = TlsOption::new(
+            cmd.tls_mode.clone(),
+            cmd.tls_cert_path.clone(),
+            cmd.tls_key_path.clone(),
+        );
+
+        if let Some(addr) = &cmd.http_addr {
+            opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(http_timeout) = cmd.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout)
+        }
+
+        if let Some(disable_dashboard) = cmd.disable_dashboard {
+            opts.http.disable_dashboard = disable_dashboard;
+        }
+
+        if let Some(addr) = &cmd.rpc_addr {
+            opts.grpc.addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &cmd.mysql_addr {
+            opts.mysql.enable = true;
+            opts.mysql.addr.clone_from(addr);
+            opts.mysql.tls = tls_opts.clone();
+        }
+
+        if let Some(addr) = &cmd.postgres_addr {
+            opts.postgres.enable = true;
+            opts.postgres.addr.clone_from(addr);
+            opts.postgres.tls = tls_opts;
+        }
+
+        if let Some(enable) = cmd.influxdb_enable {
+            opts.influxdb.enable = enable;
+        }
+
+        if let Some(metasrv_addrs) = &cmd.metasrv_addrs {
+            opts.meta_client
+                .get_or_insert_with(MetaClientOptions::default)
+                .metasrv_addrs
+                .clone_from(metasrv_addrs);
+            opts.mode = Mode::Distributed;
+        }
+
+        opts.user_provider.clone_from(&cmd.user_provider);
+
+        Ok(opts)
     }
 
     pub fn get_options(&self) -> Option<FrontendOptions> {
