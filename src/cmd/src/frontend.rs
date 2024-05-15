@@ -55,14 +55,6 @@ impl Instance {
     pub fn new(frontend: FeInstance) -> Self {
         Self { frontend }
     }
-
-    pub fn mut_inner(&mut self) -> &mut FeInstance {
-        &mut self.frontend
-    }
-
-    pub fn inner(&self) -> &FeInstance {
-        &self.frontend
-    }
 }
 
 pub const APP_NAME: &str = "greptime-frontend";

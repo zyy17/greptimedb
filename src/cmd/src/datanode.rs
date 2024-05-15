@@ -43,14 +43,6 @@ impl Instance {
     pub fn new(datanode: Datanode) -> Self {
         Self { datanode }
     }
-
-    pub fn datanode_mut(&mut self) -> &mut Datanode {
-        &mut self.datanode
-    }
-
-    pub fn datanode(&self) -> &Datanode {
-        &self.datanode
-    }
 }
 
 pub const APP_NAME: &str = "greptime-datanode";
