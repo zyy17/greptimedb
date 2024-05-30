@@ -20,6 +20,7 @@ use common_telemetry::{error, info};
 use crate::error::Result;
 
 pub mod cli;
+pub mod compactor;
 pub mod datanode;
 pub mod error;
 pub mod frontend;

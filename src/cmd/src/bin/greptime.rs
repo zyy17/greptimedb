@@ -17,7 +17,7 @@
 use clap::{Parser, Subcommand};
 use cmd::error::Result;
 use cmd::options::GlobalOptions;
-use cmd::{cli, datanode, frontend, metasrv, standalone, App};
+use cmd::{cli, compactor, datanode, frontend, metasrv, standalone, App};
 use common_version::version;
 
 #[derive(Parser)]
@@ -52,6 +52,10 @@ enum SubCommand {
     /// Execute the cli tools for greptimedb.
     #[clap(name = "cli")]
     Cli(cli::Command),
+
+    /// Run compactor service.
+    #[clap(name = "compactor")]
+    Compactor(compactor::Command),
 }
 
 #[cfg(not(windows))]
@@ -91,6 +95,12 @@ async fn start(cli: Command) -> Result<()> {
                 .await
         }
         SubCommand::Cli(cmd) => {
+            cmd.build(cmd.load_options(&cli.global_options)?)
+                .await?
+                .run()
+                .await
+        }
+        SubCommand::Compactor(cmd) => {
             cmd.build(cmd.load_options(&cli.global_options)?)
                 .await?
                 .run()
