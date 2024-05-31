@@ -12,13 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use clap::Parser;
+use common_base::readable_size::ReadableSize;
 use common_config::Configurable;
+use common_telemetry::info;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_version::{short_version, version};
+use common_wal::config::raft_engine::RaftEngineConfig;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
+use mito2::config::MitoConfig;
+use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
+use object_store::manager::ObjectStoreManager;
+use object_store::services::Fs;
+use object_store::util::join_dir;
+use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::path_utils::region_dir;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionCompactRequest, RegionOpenRequest, RegionRequest};
+use store_api::storage::RegionId;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::LoadLayeredConfigSnafu;
@@ -154,6 +172,68 @@ impl StartCommand {
             common_telemetry::init_global_logging(APP_NAME, &opts.logging, &opts.tracing, None);
         log_versions(version!(), short_version!());
 
+        let data_home = "/tmp/greptimedb";
+        let catalog = "greptime";
+        let schema = "public";
+        let region_id = RegionId::from_u64(4398046511104);
+
+        let object_store_manager = Arc::new(create_object_store_manager(data_home));
+        let log_store = Arc::new(create_log_stre(data_home).await);
+
+        let engine = MitoEngine::new(
+            data_home,
+            MitoConfig::default(),
+            log_store,
+            object_store_manager,
+        )
+        .await
+        .unwrap();
+
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    region_dir: region_dir(format!("{}/{}", catalog, schema).as_str(), region_id),
+                    options: HashMap::default(),
+                    skip_wal_replay: true,
+                }),
+            )
+            .await
+            .unwrap();
+
+        engine.set_writable(region_id, true).unwrap();
+
+        let result = engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        info!("compaction result: {:?}", result);
+
         Ok(Instance::new(guard))
     }
+}
+
+async fn create_log_stre(data_home: &str) -> RaftEngineLogStore {
+    let wal_path = Path::new(data_home)
+        .join("wal")
+        .to_string_lossy()
+        .into_owned();
+    let cfg = RaftEngineConfig {
+        file_size: ReadableSize::kb(128),
+        ..Default::default()
+    };
+    RaftEngineLogStore::try_new(wal_path, cfg).await.unwrap()
+}
+
+fn create_object_store_manager(data_home: &str) -> ObjectStoreManager {
+    let atomic_write_dir = join_dir(data_home, ".tmp/");
+    let mut builder = Fs::default();
+    let _ = builder.root(data_home).atomic_write_dir(&atomic_write_dir);
+    let object_store = ObjectStore::new(builder).unwrap().finish();
+    ObjectStoreManager::new("default", object_store)
 }
