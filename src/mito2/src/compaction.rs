@@ -14,11 +14,11 @@
 
 mod buckets;
 mod picker;
-mod task;
+pub(crate) mod task;
 #[cfg(test)]
 mod test_util;
 mod twcs;
-mod window;
+pub(crate) mod window;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -423,7 +423,7 @@ pub(crate) struct CompactionOutput {
 }
 
 /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-async fn build_sst_reader(
+pub(crate) async fn build_sst_reader(
     metadata: RegionMetadataRef,
     sst_layer: AccessLayerRef,
     cache: Option<CacheManagerRef>,

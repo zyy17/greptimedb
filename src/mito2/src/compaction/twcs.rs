@@ -127,53 +127,27 @@ impl Picker for TwcsPicker {
             ..
         } = req;
 
-        let region_metadata = current_version.metadata.clone();
-        let region_id = region_metadata.region_id;
+        let picker_output = self.pick(current_version.clone());
 
-        let levels = current_version.ssts.levels();
-        let ttl = current_version.options.ttl;
-        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
-        if !expired_ssts.is_empty() {
-            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-            // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.set_compacting(true));
-        }
-
-        let compaction_time_window = current_version
-            .compaction_time_window
-            .map(|window| window.as_secs() as i64);
-        let time_window_size = compaction_time_window
-            .or(self.time_window_seconds)
-            .unwrap_or_else(|| {
-                let inferred = infer_time_bucket(levels[0].files());
-                info!(
-                    "Compaction window for region {} is not present, inferring from files: {:?}",
-                    region_id, inferred
-                );
-                inferred
-            });
-
-        // Find active window from files in level 0.
-        let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
-        // Assign files to windows
-        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-        let outputs = self.build_output(&windows, active_window);
-
-        if outputs.is_empty() && expired_ssts.is_empty() {
+        if picker_output.compaction_outputs.is_empty() && picker_output.expired_ssts.is_empty() {
             // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
             for waiter in waiters {
                 waiter.send(Ok(0));
             }
             return None;
         }
+
+        let region_metadata = current_version.metadata.clone();
+        let region_id = region_metadata.region_id;
+
         let task = CompactionTaskImpl {
             engine_config,
             region_id,
-            metadata: region_metadata,
+            metadata: current_version.metadata.clone(),
             sst_layer: access_layer,
-            outputs,
-            expired_ssts,
-            compaction_time_window: Some(time_window_size),
+            outputs: picker_output.compaction_outputs,
+            expired_ssts: picker_output.expired_ssts,
+            compaction_time_window: Some(picker_output.time_window_size),
             request_sender,
             waiters,
             file_purger,
@@ -222,9 +196,9 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window);
 
         PickerOutput {
-            compaction_output: outputs,
+            compaction_outputs: outputs,
             expired_ssts,
-            time_window_size: Some(time_window_size),
+            time_window_size,
         }
     }
 }

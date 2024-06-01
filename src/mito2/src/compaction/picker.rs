@@ -35,7 +35,7 @@ pub trait Picker: Debug + Send + 'static {
 }
 
 pub struct PickerOutput {
-    pub compaction_output: Vec<CompactionOutput>,
+    pub compaction_outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
-    pub time_window_size: Option<i64>,
+    pub time_window_size: i64,
 }

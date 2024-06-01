@@ -117,17 +117,16 @@ impl Picker for WindowedCompactionPicker {
             listener,
         } = req;
 
-        let (outputs, expired_ssts, time_window) =
-            self.pick_inner(region_id, &current_version, Timestamp::current_millis());
+        let picker_output = self.pick(current_version.clone());
 
         let task = CompactionTaskImpl {
             engine_config: engine_config.clone(),
             region_id,
             metadata: current_version.metadata.clone().clone(),
             sst_layer: access_layer.clone(),
-            outputs,
-            expired_ssts,
-            compaction_time_window: Some(time_window),
+            outputs: picker_output.compaction_outputs,
+            expired_ssts: picker_output.expired_ssts,
+            compaction_time_window: Some(picker_output.time_window_size),
             request_sender,
             waiters,
             file_purger,
@@ -150,9 +149,9 @@ impl Picker for WindowedCompactionPicker {
             Timestamp::current_millis(),
         );
         PickerOutput {
-            compaction_output: outputs,
+            compaction_outputs: outputs,
             expired_ssts,
-            time_window_size: Some(time_window),
+            time_window_size: time_window,
         }
     }
 }

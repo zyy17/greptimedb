@@ -44,7 +44,7 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
 
-const MAX_PARALLEL_COMPACTION: usize = 8;
+pub(crate) const MAX_PARALLEL_COMPACTION: usize = 8;
 
 pub(crate) struct CompactionTaskImpl {
     pub engine_config: Arc<MitoConfig>,
