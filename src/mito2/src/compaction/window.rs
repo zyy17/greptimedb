@@ -23,7 +23,7 @@ use common_time::Timestamp;
 use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::picker::{CompactionTask, Picker};
+use crate::compaction::picker::{CompactionTask, Picker, PickerOutput};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
 use crate::region::version::VersionRef;
@@ -101,7 +101,7 @@ impl WindowedCompactionPicker {
 }
 
 impl Picker for WindowedCompactionPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
+    fn build_compaction_task(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
         let region_id = req.region_id();
         let CompactionRequest {
             engine_config,
@@ -141,6 +141,19 @@ impl Picker for WindowedCompactionPicker {
             listener,
         };
         Some(Box::new(task))
+    }
+
+    fn pick(&self, current_version: VersionRef) -> PickerOutput {
+        let (outputs, expired_ssts, time_window) = self.pick_inner(
+            current_version.metadata.region_id,
+            &current_version,
+            Timestamp::current_millis(),
+        );
+        PickerOutput {
+            compaction_output: outputs,
+            expired_ssts,
+            time_window_size: Some(time_window),
+        }
     }
 }
 

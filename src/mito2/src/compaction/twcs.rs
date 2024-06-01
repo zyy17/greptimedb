@@ -22,9 +22,10 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 
 use crate::compaction::buckets::infer_time_bucket;
-use crate::compaction::picker::{CompactionTask, Picker};
+use crate::compaction::picker::{CompactionTask, Picker, PickerOutput};
 use crate::compaction::task::CompactionTaskImpl;
 use crate::compaction::{get_expired_ssts, CompactionOutput, CompactionRequest};
+use crate::region::version::VersionRef;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::version::LevelMeta;
 
@@ -110,7 +111,7 @@ impl TwcsPicker {
 }
 
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
+    fn build_compaction_task(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
         let CompactionRequest {
             engine_config,
             current_version,
@@ -186,6 +187,45 @@ impl Picker for TwcsPicker {
             listener,
         };
         Some(Box::new(task))
+    }
+
+    fn pick(&self, current_version: VersionRef) -> PickerOutput {
+        let region_id = current_version.metadata.region_id;
+
+        let levels = current_version.ssts.levels();
+        let ttl = current_version.options.ttl;
+        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
+        if !expired_ssts.is_empty() {
+            info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
+            // here we mark expired SSTs as compacting to avoid them being picked.
+            expired_ssts.iter().for_each(|f| f.set_compacting(true));
+        }
+
+        let compaction_time_window = current_version
+            .compaction_time_window
+            .map(|window| window.as_secs() as i64);
+        let time_window_size = compaction_time_window
+            .or(self.time_window_seconds)
+            .unwrap_or_else(|| {
+                let inferred = infer_time_bucket(levels[0].files());
+                info!(
+                    "Compaction window for region {} is not present, inferring from files: {:?}",
+                    region_id, inferred
+                );
+                inferred
+            });
+
+        // Find active window from files in level 0.
+        let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
+        // Assign files to windows
+        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+        let outputs = self.build_output(&windows, active_window);
+
+        PickerOutput {
+            compaction_output: outputs,
+            expired_ssts,
+            time_window_size: Some(time_window_size),
+        }
     }
 }
 

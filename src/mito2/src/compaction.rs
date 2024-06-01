@@ -260,7 +260,7 @@ impl CompactionScheduler {
         let pick_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["pick"])
             .start_timer();
-        let Some(mut task) = picker.pick(request) else {
+        let Some(mut task) = picker.build_compaction_task(request) else {
             // Nothing to compact, remove it from the region status map.
             self.region_status.remove(&region_id);
             return Ok(());
