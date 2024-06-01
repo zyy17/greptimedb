@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::compact_request;
+use common_telemetry::info;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
@@ -55,16 +56,132 @@ pub struct CompactionRequest {
     pub catalog: String,
     pub schema: String,
     pub region_id: RegionId,
-    pub region_options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
     pub compaction_options: compact_request::Options,
 }
 
+pub struct CompactedRegion {
+    pub region_options: RegionOptions,
+    pub object_store: ObjectStore,
+    pub manifest_manager: RegionManifestManager,
+    pub access_layer: AccessLayerRef,
+    pub region_dir: String,
+    pub current_version: VersionRef,
+}
+
 impl Compactor {
+    pub async fn open_compacted_region(
+        &self,
+        catalog: String,
+        schema: String,
+        region_id: RegionId,
+        options: HashMap<String, String>,
+    ) -> Result<CompactedRegion> {
+        let region_options = RegionOptions::try_from(&options)?;
+        let region_dir = region_dir(format!("{}/{}", catalog, schema).as_str(), region_id);
+
+        let object_store = {
+            let name = &region_options.storage;
+            if let Some(name) = name {
+                self.object_store_manager
+                    .find(name)
+                    .context(ObjectStoreNotFoundSnafu {
+                        object_store: name.to_string(),
+                    })?
+            } else {
+                self.object_store_manager.default_object_store()
+            }
+        };
+
+        let access_layer = {
+            // TODO(zyy17): Should we really need to create intermediate manager here?
+            let intermediate_manager = IntermediateManager::init_fs(
+                self.mito_config.inverted_index.intermediate_path.clone(),
+            )
+            .await?;
+
+            Arc::new(AccessLayer::new(
+                region_dir.to_string(),
+                object_store.clone(),
+                intermediate_manager,
+            ))
+        };
+
+        let manifest_manager = {
+            let region_manifest_options = RegionManifestOptions {
+                // TODO(zyy17): It needs to add a new function instead of using join_dir.
+                manifest_dir: join_dir(&region_dir, "manifest"),
+                object_store: object_store.clone(),
+                compress_type: manifest_compress_type(self.mito_config.compress_manifest),
+                checkpoint_distance: self.mito_config.manifest_checkpoint_distance,
+            };
+
+            // TODO(zyy17): handle error.
+            RegionManifestManager::open(region_manifest_options)
+                .await?
+                .unwrap()
+        };
+
+        let current_version = {
+            let manifest = manifest_manager.manifest();
+            let metadata = manifest.metadata.clone();
+            let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
+                self.mito_config.global_write_buffer_size.as_bytes() as usize,
+            ));
+            let memtable_builder_provider = MemtableBuilderProvider::new(
+                Some(write_buffer_manager.clone()),
+                self.mito_config.clone(),
+            );
+
+            let memtable_builder = memtable_builder_provider.builder_for_options(
+                region_options.memtable.as_ref(),
+                !region_options.append_mode,
+            );
+
+            // Initial memtable id is 0.
+            let part_duration = region_options.compaction.time_window();
+            let mutable = Arc::new(TimePartitions::new(
+                metadata.clone(),
+                memtable_builder.clone(),
+                0,
+                part_duration,
+            ));
+
+            let purge_scheduler =
+                Arc::new(LocalScheduler::new(self.mito_config.max_background_jobs));
+            let file_purger = Arc::new(LocalFilePurger::new(
+                purge_scheduler.clone(),
+                access_layer.clone(),
+                None,
+            ));
+
+            let version = VersionBuilder::new(metadata, mutable)
+                .add_files(file_purger.clone(), manifest.files.values().cloned())
+                .flushed_entry_id(manifest.flushed_entry_id)
+                .flushed_sequence(manifest.flushed_sequence)
+                .truncated_entry_id(manifest.truncated_entry_id)
+                .compaction_time_window(manifest.compaction_time_window)
+                .options(region_options)
+                .build();
+            let version_control = Arc::new(VersionControl::new(version));
+            version_control.current().version
+        };
+
+        Ok(CompactedRegion {
+            region_options,
+            object_store: object_store.clone(),
+            manifest_manager,
+            access_layer,
+            region_dir,
+            current_version,
+        })
+    }
+
     pub async fn merge_ssts(
         &mut self,
         req: CompactionRequest,
     ) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
-        let region_options = RegionOptions::try_from(&req.region_options)?;
+        let region_options = RegionOptions::try_from(&req.options)?;
         let object_store = self.object_store(&region_options.storage)?;
         let region_dir = region_dir(
             format!("{}/{}", req.catalog, req.schema).as_str(),
@@ -228,22 +345,6 @@ impl Compactor {
             .await?
             .unwrap();
         Ok(manifest_manager)
-    }
-
-    async fn access_layer(
-        &self,
-        region_dir: &str,
-        object_store: ObjectStore,
-    ) -> Result<Arc<AccessLayer>> {
-        let intermediate_manager =
-            IntermediateManager::init_fs(self.mito_config.inverted_index.intermediate_path.clone())
-                .await?;
-
-        Ok(Arc::new(AccessLayer::new(
-            region_dir.to_string(),
-            object_store,
-            intermediate_manager,
-        )))
     }
 
     async fn version_ref(

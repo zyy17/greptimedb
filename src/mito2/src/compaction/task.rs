@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::access_layer::{AccessLayerRef, SstWriteRequest};
 use crate::cache::CacheManagerRef;
-use crate::compaction::picker::CompactionTask;
+use crate::compaction::picker::{CompactionTask, PickerOutput};
 use crate::compaction::{build_sst_reader, CompactionOutput};
 use crate::config::MitoConfig;
 use crate::error;

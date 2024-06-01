@@ -1594,6 +1594,7 @@ dependencies = [
 name = "cmd"
 version = "0.8.0"
 dependencies = [
+ "api",
  "async-trait",
  "auth",
  "base64 0.21.7",

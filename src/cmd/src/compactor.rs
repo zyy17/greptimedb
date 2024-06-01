@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use api::v1::region::compact_request;
+use api::v1::region::compact_request::Options::Regular;
 use async_trait::async_trait;
 use clap::Parser;
 use common_base::readable_size::ReadableSize;
@@ -25,6 +27,7 @@ use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_version::{short_version, version};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
+use mito2::compactor::{CompactionRequest, Compactor};
 use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
 use object_store::manager::ObjectStoreManager;
@@ -173,47 +176,68 @@ impl StartCommand {
         log_versions(version!(), short_version!());
 
         let data_home = "/tmp/greptimedb";
-        let catalog = "greptime";
-        let schema = "public";
-        let region_id = RegionId::from_u64(4398046511104);
+        let mut mito_config = MitoConfig::default();
+        mito_config.inverted_index.intermediate_path = join_dir(data_home, "index_intermediate");
+        let mut compactor = Compactor {
+            mito_config: Arc::new(mito_config),
+            object_store_manager: Arc::new(create_object_store_manager(data_home)),
+        };
 
-        let object_store_manager = Arc::new(create_object_store_manager(data_home));
-        let log_store = Arc::new(create_log_stre(data_home).await);
-
-        let engine = MitoEngine::new(
-            data_home,
-            MitoConfig::default(),
-            log_store,
-            object_store_manager,
-        )
-        .await
-        .unwrap();
-
-        engine
-            .handle_request(
-                region_id,
-                RegionRequest::Open(RegionOpenRequest {
-                    engine: MITO_ENGINE_NAME.to_string(),
-                    region_dir: region_dir(format!("{}/{}", catalog, schema).as_str(), region_id),
-                    options: HashMap::default(),
-                    skip_wal_replay: true,
-                }),
-            )
-            .await
-            .unwrap();
-
-        engine.set_writable(region_id, true).unwrap();
-
-        let result = engine
-            .handle_request(
-                region_id,
-                RegionRequest::Compact(RegionCompactRequest::default()),
-            )
+        let result = compactor
+            .merge_ssts(CompactionRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                region_id: RegionId::from_u64(4398046511104),
+                options: HashMap::default(),
+                compaction_options: Regular(Default::default()),
+            })
             .await
             .unwrap();
 
         info!("compaction result: {:?}", result);
 
+        /*        let data_home = "/tmp/greptimedb";
+                let catalog = "greptime";
+                let schema = "public";
+                let region_id = RegionId::from_u64(4398046511104);
+
+                let object_store_manager = Arc::new(create_object_store_manager(data_home));
+                let log_store = Arc::new(create_log_stre(data_home).await);
+
+                let engine = MitoEngine::new(
+                    data_home,
+                    MitoConfig::default(),
+                    log_store,
+                    object_store_manager,
+                )
+                .await
+                .unwrap();
+
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Open(RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            region_dir: region_dir(format!("{}/{}", catalog, schema).as_str(), region_id),
+                            options: HashMap::default(),
+                            skip_wal_replay: true,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+
+                engine.set_writable(region_id, true).unwrap();
+
+                let result = engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Compact(RegionCompactRequest::default()),
+                    )
+                    .await
+                    .unwrap();
+
+                info!("compaction result: {:?}", result);
+        */
         Ok(Instance::new(guard))
     }
 }
