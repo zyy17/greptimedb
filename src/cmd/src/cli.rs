@@ -17,6 +17,7 @@ mod bench;
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 #[allow(unused)]
 mod cmd;
+mod compact;
 mod export;
 mod helper;
 
@@ -31,7 +32,8 @@ use common_telemetry::logging::{LoggingOptions, TracingOptions};
 pub use repl::Repl;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use self::export::ExportCommand;
+use crate::cli::compact::CompactCommand;
+use crate::cli::export::ExportCommand;
 use crate::error::Result;
 use crate::options::GlobalOptions;
 use crate::App;
@@ -114,6 +116,7 @@ enum SubCommand {
     // Attach(AttachCommand),
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
+    Compact(CompactCommand),
 }
 
 impl SubCommand {
@@ -122,6 +125,7 @@ impl SubCommand {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build(guard).await,
             SubCommand::Export(cmd) => cmd.build(guard).await,
+            SubCommand::Compact(cmd) => cmd.build(guard).await,
         }
     }
 }
