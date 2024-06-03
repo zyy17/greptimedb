@@ -1596,6 +1596,7 @@ dependencies = [
 name = "cmd"
 version = "0.8.1"
 dependencies = [
+ "api",
  "async-trait",
  "auth",
  "base64 0.21.7",
@@ -1635,6 +1636,7 @@ dependencies = [
  "mito2",
  "moka",
  "nu-ansi-term",
+ "object-store",
  "plugins",
  "prometheus",
  "prost 0.12.6",

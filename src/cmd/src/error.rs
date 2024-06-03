@@ -325,6 +325,20 @@ pub enum Error {
         location: Location,
         source: cache::error::Error,
     },
+
+    #[snafu(display("Failed to open compact region"))]
+    OpenCompactRegion {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito2::error::Error,
+    },
+
+    #[snafu(display("Failed to compact region"))]
+    CompactRegion {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito2::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -379,7 +393,10 @@ impl ErrorExt for Error {
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
-            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. }
+            | Error::BuildCacheRegistry { .. }
+            | Error::OpenCompactRegion { .. }
+            | Error::CompactRegion { .. } => StatusCode::Internal,
         }
     }
 
