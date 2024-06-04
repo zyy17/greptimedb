@@ -85,14 +85,14 @@ impl Compact {
 impl Tool for Compact {
     async fn do_work(&self) -> Result<()> {
         let object_store_manager = self.create_object_store_manager();
-        let compactor = DefaultCompactor::new_from_request(&self.request).unwrap();
+        let compactor = DefaultCompactor {};
         let compaction_region =
             open_compaction_region(&self.request, self.data_home.as_str(), object_store_manager)
                 .await
                 .context(OpenCompactRegionSnafu)?;
 
         compactor
-            .compact(compaction_region)
+            .compact(compaction_region, self.request.compaction_options.clone())
             .await
             .context(CompactRegionSnafu)?;
 
