@@ -20,11 +20,9 @@ use api::v1::region::compact_request;
 use crate::compaction::twcs::TwcsPicker;
 use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::CompactionOutput;
-use crate::error::Result;
-use crate::region::options::{CompactionOptions, RegionOptions};
+use crate::region::options::CompactionOptions;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
-use crate::CompactionRequest;
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Debug + Send + Sync + 'static {
@@ -42,16 +40,6 @@ pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub time_window_size: i64,
-}
-
-/// Create a new DefaultCompactor from a compaction request.
-pub fn new_picker_from_request(req: &CompactionRequest) -> Result<Arc<dyn Picker>> {
-    let region_options = RegionOptions::try_from(&req.options)?;
-    let compaction_options = region_options.compaction;
-    Ok(new_picker(
-        req.compaction_options.clone(),
-        &compaction_options,
-    ))
 }
 
 pub(crate) fn new_picker(
