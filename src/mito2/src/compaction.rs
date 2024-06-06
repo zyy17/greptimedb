@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::region::compact_request;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -37,6 +37,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use table::predicate::Predicate;
 use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::RwLock;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
@@ -56,6 +57,7 @@ use crate::read::BoxedBatchReader;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
+use crate::schedule::remote_job_scheduler::{RemoteJobSchedulerRef, Scheduler};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::file_purger::FilePurgerRef;
@@ -104,6 +106,9 @@ pub(crate) struct CompactionScheduler {
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
     listener: WorkerListener,
+
+    // Run the remote compaction job.
+    remote_job_scheduler: Option<RemoteJobSchedulerRef>,
 }
 
 impl CompactionScheduler {
@@ -121,12 +126,16 @@ impl CompactionScheduler {
             cache_manager,
             engine_config,
             listener,
+            remote_job_scheduler: Some(Arc::new(RwLock::new(Scheduler::new(
+                // FIXME(zyy17): hardcode the address for now.
+                "127.0.0.1:10099",
+            )))),
         }
     }
 
     /// Schedules a compaction for the region.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn schedule_compaction(
+    pub(crate) async fn schedule_compaction(
         &mut self,
         region_id: RegionId,
         compact_options: compact_request::Options,
@@ -159,10 +168,11 @@ impl CompactionScheduler {
         );
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request, compact_options)
+            .await
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
-    pub(crate) fn on_compaction_finished(
+    pub(crate) async fn on_compaction_finished(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -181,10 +191,13 @@ impl CompactionScheduler {
             self.listener.clone(),
         );
         // Try to schedule next compaction task for this region.
-        if let Err(e) = self.schedule_compaction_request(
-            request,
-            compact_request::Options::Regular(Default::default()),
-        ) {
+        if let Err(e) = self
+            .schedule_compaction_request(
+                request,
+                compact_request::Options::Regular(Default::default()),
+            )
+            .await
+        {
             error!(e; "Failed to schedule next compaction for region {}", region_id);
         }
     }
@@ -225,15 +238,16 @@ impl CompactionScheduler {
     /// Schedules a compaction request.
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
-    fn schedule_compaction_request(
+    async fn schedule_compaction_request(
         &mut self,
         request: CompactionRequest,
         options: compact_request::Options,
     ) -> Result<()> {
         let region_id = request.region_id();
-        let Some(mut task) = build_compaction_task(request, options) else {
+        let Some(mut task) = self.build_compaction_task(request, options).await else {
             // Nothing to compact, remove it from the region status map.
             self.region_status.remove(&region_id);
+            println!("Nothing to compact, remove it from the region status map.");
             return Ok(());
         };
 
@@ -258,6 +272,93 @@ impl CompactionScheduler {
 
         // Notifies all pending tasks.
         status.on_failure(err);
+    }
+
+    async fn build_compaction_task(
+        &self,
+        req: CompactionRequest,
+        options: compact_request::Options,
+    ) -> Option<Box<dyn CompactionTask>> {
+        let region_id = req.region_id();
+        let CompactionRequest {
+            engine_config,
+            current_version,
+            access_layer,
+            request_sender,
+            waiters,
+            file_purger,
+            start_time,
+            cache_manager,
+            manifest_ctx,
+            version_control,
+            listener,
+        } = req;
+
+        let compaction_region = CompactionRegion {
+            region_id,
+            region_options: current_version.options.clone(),
+            engine_config: engine_config.clone(),
+            region_metadata: current_version.metadata.clone(),
+            cache_manager: cache_manager.clone(),
+            access_layer: access_layer.clone(),
+            file_purger: file_purger.clone(),
+            manifest_ctx: manifest_ctx.clone(),
+            version_control: version_control.clone(),
+        };
+
+        match &self.remote_job_scheduler {
+            None => {
+                let region_options = current_version.options.clone();
+                let picker = new_picker(options, &region_options.compaction);
+                debug!(
+                    "Pick compaction strategy {:?} for region: {}",
+                    picker, region_id
+                );
+                let pick_timer = COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["pick"])
+                    .start_timer();
+                let picker_output = picker.pick(compaction_region.clone());
+                drop(pick_timer);
+
+                let picker_output = {
+                    if let Some(picker_output) = picker_output {
+                        picker_output
+                    } else {
+                        // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
+                        for waiter in waiters {
+                            waiter.send(Ok(0));
+                        }
+                        return None;
+                    }
+                };
+
+                let task = CompactionTaskImpl {
+                    request_sender,
+                    waiters,
+                    start_time,
+                    listener,
+                    picker_output,
+                    compaction_region,
+                    compactor: Arc::new(DefaultCompactor {}),
+                };
+
+                Some(Box::new(task))
+            }
+            Some(remote_job_scheduler) => {
+                for waiter in waiters {
+                    waiter.send(Ok(0));
+                }
+                // FIXME(zyy17): Handle the errors.
+                let job_id = remote_job_scheduler
+                    .write()
+                    .await
+                    .create_job(compaction_region.clone())
+                    .await
+                    .unwrap();
+                info!("Created remote compaction job: {}", job_id.as_u64());
+                None
+            }
+        }
     }
 }
 
@@ -497,73 +598,6 @@ fn get_expired_ssts(
         .iter()
         .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
         .collect()
-}
-
-fn build_compaction_task(
-    req: CompactionRequest,
-    options: compact_request::Options,
-) -> Option<Box<dyn CompactionTask>> {
-    let picker = new_picker(options, &req.current_version.options.compaction);
-    let region_id = req.region_id();
-    let CompactionRequest {
-        engine_config,
-        current_version,
-        access_layer,
-        request_sender,
-        waiters,
-        file_purger,
-        start_time,
-        cache_manager,
-        manifest_ctx,
-        version_control,
-        listener,
-    } = req;
-    debug!(
-        "Pick compaction strategy {:?} for region: {}",
-        picker, region_id
-    );
-
-    let compaction_region = CompactionRegion {
-        region_id,
-        region_options: current_version.options.clone(),
-        engine_config: engine_config.clone(),
-        region_metadata: current_version.metadata.clone(),
-        cache_manager: cache_manager.clone(),
-        access_layer: access_layer.clone(),
-        file_purger: file_purger.clone(),
-        manifest_ctx: manifest_ctx.clone(),
-        version_control: version_control.clone(),
-    };
-
-    let pick_timer = COMPACTION_STAGE_ELAPSED
-        .with_label_values(&["pick"])
-        .start_timer();
-    let picker_output = picker.pick(compaction_region.clone());
-    drop(pick_timer);
-
-    let picker_output = {
-        if let Some(picker_output) = picker_output {
-            picker_output
-        } else {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in waiters {
-                waiter.send(Ok(0));
-            }
-            return None;
-        }
-    };
-
-    let task = CompactionTaskImpl {
-        request_sender,
-        waiters,
-        start_time,
-        listener,
-        picker_output,
-        compaction_region,
-        compactor: Arc::new(DefaultCompactor {}),
-    };
-
-    Some(Box::new(task))
 }
 
 #[cfg(test)]

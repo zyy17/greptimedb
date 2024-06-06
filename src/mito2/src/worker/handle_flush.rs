@@ -237,15 +237,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_stalled_requests().await;
 
         // Schedules compaction.
-        if let Err(e) = self.compaction_scheduler.schedule_compaction(
-            region.region_id,
-            compact_request::Options::Regular(Default::default()),
-            &region.version_control,
-            &region.access_layer,
-            &region.file_purger,
-            OptionOutputTx::none(),
-            &region.manifest_ctx,
-        ) {
+        if let Err(e) = self
+            .compaction_scheduler
+            .schedule_compaction(
+                region.region_id,
+                compact_request::Options::Regular(Default::default()),
+                &region.version_control,
+                &region.access_layer,
+                &region.file_purger,
+                OptionOutputTx::none(),
+                &region.manifest_ctx,
+            )
+            .await
+        {
             warn!(
                 "Failed to schedule compaction after flush, region: {}, err: {}",
                 region.region_id, e
