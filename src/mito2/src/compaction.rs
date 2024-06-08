@@ -56,7 +56,10 @@ use crate::read::BoxedBatchReader;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::region::ManifestContextRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
-use crate::schedule::remote_job_scheduler::{CompactionJob, RemoteJob, RemoteJobSchedulerRef};
+use crate::schedule::remote_job_scheduler::{
+    CompactionJob, RemoteJob, RemoteJobSchedulerImpl, RemoteJobSchedulerOption,
+    RemoteJobSchedulerRef,
+};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileId, Level};
 use crate::sst::version::LevelMeta;
@@ -117,13 +120,16 @@ impl CompactionScheduler {
         Self {
             scheduler,
             region_status: HashMap::new(),
-            request_sender,
+            request_sender: request_sender.clone(),
             cache_manager,
             engine_config,
             listener,
 
-            // TODO(zyy17): The RemoteJobSchedulerRef can be injected by plugin system.
-            remote_job_scheduler: None,
+            // TODO(zyy17): The RemoteJobSchedulerRef should be injected by plugin system.
+            remote_job_scheduler: Some(Arc::new(RemoteJobSchedulerImpl::new(
+                &RemoteJobSchedulerOption::default(),
+                request_sender.clone(),
+            ))),
         }
     }
 
@@ -179,6 +185,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
         );
+
         // Try to schedule next compaction task for this region.
         if let Err(e) = self
             .schedule_compaction_request(
@@ -272,6 +279,7 @@ impl CompactionScheduler {
             picker_output
         } else {
             // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
+            info!("No files to compact for region {}", region_id);
             for waiter in waiters {
                 waiter.send(Ok(0));
             }
