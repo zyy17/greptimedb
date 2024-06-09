@@ -744,6 +744,24 @@ pub enum Error {
         location: Location,
         source: Arc<Error>,
     },
+
+    // Added for remote job scheduler.
+    #[snafu(display("Failed to create gRPC channel"))]
+    CreateChannel {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display("{}", msg))]
+    RemoteJobScheduler { code: StatusCode, msg: String },
+
+    #[snafu(display("The remote job scheduler client is not started"))]
+    RemoteJobSchedulerClientNotStarted {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -861,6 +879,12 @@ impl ErrorExt for Error {
             RegionStopped { .. } => StatusCode::RegionNotReady,
             TimeRangePredicateOverflow { .. } => StatusCode::InvalidArguments,
             BuildTimeRangeFilter { .. } => StatusCode::Unexpected,
+
+            // Added for remote job scheduler.
+            CreateChannel { .. } | RemoteJobSchedulerClientNotStarted { .. } => {
+                StatusCode::Internal
+            }
+            RemoteJobScheduler { code, .. } => *code,
         }
     }
 

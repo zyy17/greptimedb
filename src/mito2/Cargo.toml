@@ -70,6 +70,8 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+tonic.workspace = true
+common-grpc.workspace = true
 
 [dev-dependencies]
 common-procedure-test.workspace = true
