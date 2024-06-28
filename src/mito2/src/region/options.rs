@@ -181,12 +181,12 @@ impl Default for CompactionOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
-    /// Max num of files that can be kept in active writing time window.
+    /// Max num of sorted runs that can be kept in active writing time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_active_window_files: usize,
+    pub max_active_window_runs: usize,
     /// Max num of files that can be kept in inactive time window.
     #[serde_as(as = "DisplayFromStr")]
-    pub max_inactive_window_files: usize,
+    pub max_inactive_window_runs: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
@@ -214,8 +214,8 @@ impl TwcsOptions {
 impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
-            max_active_window_files: 4,
-            max_inactive_window_files: 1,
+            max_active_window_runs: 1,
+            max_inactive_window_runs: 1,
             time_window: None,
             remote_compaction: false,
         }
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_without_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
         ]);
         let err = RegionOptions::try_from(&map).unwrap_err();
@@ -449,14 +449,14 @@ mod tests {
     #[test]
     fn test_with_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.max_active_window_files", "8"),
+            ("compaction.twcs.max_active_window_runs", "8"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
+                max_active_window_runs: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -557,8 +557,8 @@ mod tests {
         });
         let map = make_map(&[
             ("ttl", "7d"),
-            ("compaction.twcs.max_active_window_files", "8"),
-            ("compaction.twcs.max_inactive_window_files", "2"),
+            ("compaction.twcs.max_active_window_runs", "8"),
+            ("compaction.twcs.max_inactive_window_runs", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("compaction.twcs.remote_compaction", "false"),
@@ -580,8 +580,8 @@ mod tests {
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7)),
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                max_active_window_files: 8,
-                max_inactive_window_files: 2,
+                max_active_window_runs: 8,
+                max_inactive_window_runs: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 remote_compaction: false,
             }),
