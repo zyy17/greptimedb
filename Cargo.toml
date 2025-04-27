@@ -31,6 +31,7 @@ members = [
     "src/common/runtime",
     "src/common/session",
     "src/common/substrait",
+    "src/common/system-table",
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
@@ -250,6 +251,7 @@ common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
+common-system-table = { path = "src/common/system-table" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }

@@ -2575,6 +2575,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-system-table"
+version = "0.15.0"
+dependencies = [
+ "api",
+ "catalog",
+ "common-catalog",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "operator",
+ "session",
+ "snafu 0.8.5",
+ "table",
+]
+
+[[package]]
 name = "common-telemetry"
 version = "0.15.0"
 dependencies = [
@@ -4523,6 +4539,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-system-table",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -8722,6 +8739,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-system-table",
  "common-telemetry",
  "common-time",
  "criterion 0.4.0",

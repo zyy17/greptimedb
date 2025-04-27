@@ -17,19 +17,17 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::v1::CreateTableExpr;
-use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
+use common_system_table::SystemTableManagerRef;
 use common_telemetry::info;
 use datatypes::timestamp::TimestampNanosecond;
 use futures::FutureExt;
-use operator::insert::InserterRef;
-use operator::statement::StatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
-use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
+use crate::error::{PipelineTableNotFoundSnafu, Result, SystemTableSnafu};
 use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
 use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
@@ -47,19 +45,17 @@ use crate::Pipeline;
 /// - Add a pipeline table to the cache
 /// - Get a pipeline table from the cache
 pub struct PipelineOperator {
-    inserter: InserterRef,
-    statement_executor: StatementExecutorRef,
-    catalog_manager: CatalogManagerRef,
+    system_table_manager: SystemTableManagerRef,
     query_engine: QueryEngineRef,
     tables: RwLock<HashMap<String, PipelineTableRef>>,
 }
 
 impl PipelineOperator {
     /// Create a table request for the pipeline table.
-    fn create_table_request(&self, catalog: &str) -> RegisterSystemTableRequest {
+    fn create_table_request(&self, catalog: &str) -> CreateTableExpr {
         let (time_index, primary_keys, column_defs) = PipelineTable::build_pipeline_schema();
 
-        let create_table_expr = CreateTableExpr {
+        CreateTableExpr {
             catalog_name: catalog.to_string(),
             schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
             table_name: PIPELINE_TABLE_NAME.to_string(),
@@ -71,11 +67,6 @@ impl PipelineOperator {
             table_options: Default::default(),
             table_id: None, // Should and will be assigned by Meta.
             engine: default_engine().to_string(),
-        };
-
-        RegisterSystemTableRequest {
-            create_table_expr,
-            open_hook: None,
         }
     }
 
@@ -87,8 +78,7 @@ impl PipelineOperator {
         tables.insert(
             catalog.to_string(),
             Arc::new(PipelineTable::new(
-                self.inserter.clone(),
-                self.statement_executor.clone(),
+                self.system_table_manager.clone(),
                 table,
                 self.query_engine.clone(),
             )),
@@ -103,43 +93,11 @@ impl PipelineOperator {
             return Ok(());
         }
 
-        let RegisterSystemTableRequest {
-            create_table_expr: mut expr,
-            open_hook: _,
-        } = self.create_table_request(catalog);
-
-        // exist in catalog, just open
-        if let Some(table) = self
-            .catalog_manager
-            .table(
-                &expr.catalog_name,
-                &expr.schema_name,
-                &expr.table_name,
-                Some(&ctx),
-            )
-            .await
-            .context(CatalogSnafu)?
-        {
-            self.add_pipeline_table_to_cache(catalog, table);
-            return Ok(());
-        }
-
-        // create table
-        self.statement_executor
-            .create_table_inner(&mut expr, None, ctx.clone())
-            .await
-            .context(CreateTableSnafu)?;
-
-        let schema = &expr.schema_name;
-        let table_name = &expr.table_name;
-
-        // get from catalog
         let table = self
-            .catalog_manager
-            .table(catalog, schema, table_name, Some(&ctx))
+            .system_table_manager
+            .create_system_table(ctx.clone(), self.create_table_request(catalog))
             .await
-            .context(CatalogSnafu)?
-            .context(PipelineTableNotFoundSnafu)?;
+            .context(SystemTableSnafu)?;
 
         info!(
             "Created pipelines table {} with table id {}.",
@@ -161,16 +119,9 @@ impl PipelineOperator {
 
 impl PipelineOperator {
     /// Create a new PipelineOperator.
-    pub fn new(
-        inserter: InserterRef,
-        statement_executor: StatementExecutorRef,
-        catalog_manager: CatalogManagerRef,
-        query_engine: QueryEngineRef,
-    ) -> Self {
+    pub fn new(system_table_manager: SystemTableManagerRef, query_engine: QueryEngineRef) -> Self {
         Self {
-            inserter,
-            statement_executor,
-            catalog_manager,
+            system_table_manager,
             tables: RwLock::new(HashMap::new()),
             query_engine,
         }

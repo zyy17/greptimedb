@@ -690,10 +690,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create table"))]
-    CreateTable {
+    #[snafu(display("System table error"))]
+    SystemTable {
         #[snafu(source)]
-        source: operator::error::Error,
+        source: common_system_table::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -737,7 +737,7 @@ impl ErrorExt for Error {
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
-            CreateTable { source, .. } => source.status_code(),
+            SystemTable { source, .. } => source.status_code(),
 
             EmptyInputField { .. }
             | MissingInputField { .. }

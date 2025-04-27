@@ -22,6 +22,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
+use common_system_table::{query_ctx, SystemTableManagerRef};
 use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::logical_expr::col;
@@ -31,19 +32,15 @@ use datatypes::prelude::ScalarVector;
 use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use moka::sync::Cache;
-use operator::insert::InserterRef;
-use operator::statement::StatementExecutorRef;
 use query::dataframe::DataFrame;
 use query::QueryEngineRef;
-use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::TableInfo;
 use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
-    ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
-    PipelineNotFoundSnafu, Result,
+    ExecuteInternalStatementSnafu, InvalidPipelineVersionSnafu, PipelineNotFoundSnafu, Result,
+    SystemTableSnafu,
 };
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::{PipelineInfo, PipelineVersion};
@@ -64,9 +61,8 @@ const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
 pub struct PipelineTable {
-    inserter: InserterRef,
-    statement_executor: StatementExecutorRef,
     table: TableRef,
+    system_table_manager: SystemTableManagerRef,
     query_engine: QueryEngineRef,
     pipelines: Cache<String, Arc<Pipeline>>,
     original_pipelines: Cache<String, (String, TimestampNanosecond)>,
@@ -75,14 +71,12 @@ pub struct PipelineTable {
 impl PipelineTable {
     /// Create a new PipelineTable.
     pub fn new(
-        inserter: InserterRef,
-        statement_executor: StatementExecutorRef,
+        system_table_manager: SystemTableManagerRef,
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> Self {
         Self {
-            inserter,
-            statement_executor,
+            system_table_manager,
             table,
             query_engine,
             pipelines: Cache::builder()
@@ -197,14 +191,6 @@ impl PipelineTable {
         ]
     }
 
-    fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
-        QueryContextBuilder::default()
-            .current_catalog(table_info.catalog_name.to_string())
-            .current_schema(table_info.schema_name.to_string())
-            .build()
-            .into()
-    }
-
     /// Compile a pipeline from a string.
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline> {
         let yaml_content = Content::Yaml(pipeline);
@@ -244,14 +230,10 @@ impl PipelineTable {
         };
 
         let output = self
-            .inserter
-            .handle_row_inserts(
-                requests,
-                Self::query_ctx(&table_info),
-                &self.statement_executor,
-            )
+            .system_table_manager
+            .insert_rows(self.table.clone(), requests)
             .await
-            .context(InsertPipelineSnafu)?;
+            .context(SystemTableSnafu)?;
 
         info!(
             "Insert pipeline success, name: {:?}, table: {:?}, output: {:?}",
@@ -411,7 +393,7 @@ impl PipelineTable {
         // 4. execute dml stmt
         let output = self
             .query_engine
-            .execute(plan, Self::query_ctx(&table_info))
+            .execute(plan, query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
 
@@ -473,7 +455,7 @@ impl PipelineTable {
         // 2. execute plan
         let output = self
             .query_engine
-            .execute(plan, Self::query_ctx(&table_info))
+            .execute(plan, query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output.data {

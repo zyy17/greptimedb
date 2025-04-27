@@ -24,6 +24,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_system_table::SystemTableManager;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -180,10 +181,14 @@ impl FrontendBuilder {
             table_route_cache,
         ));
 
-        let pipeline_operator = Arc::new(PipelineOperator::new(
+        let system_table_manager = Arc::new(SystemTableManager::new(
             inserter.clone(),
             statement_executor.clone(),
             self.catalog_manager.clone(),
+        ));
+
+        let pipeline_operator = Arc::new(PipelineOperator::new(
+            system_table_manager.clone(),
             query_engine.clone(),
         ));
 
