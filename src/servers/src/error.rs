@@ -622,6 +622,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table operation error"))]
+    TableOperation {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unknown hint: {}", hint))]
     UnknownHint { hint: String },
 }
@@ -642,7 +649,8 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
-            | FileWatch { .. } => StatusCode::Internal,
+            | FileWatch { .. }
+            | TableOperation { .. } => StatusCode::Internal,
 
             AddressBind { .. }
             | AlreadyStarted { .. }
