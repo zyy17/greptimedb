@@ -108,7 +108,7 @@ pub async fn fetch_byte_ranges(
     let result = object_store
         .reader_with(file_path)
         .concurrent(FETCH_PARALLELISM)
-        .chunk(4 * 1024 * 1024)
+        .chunk(16 * 1024 * 1024)
         .gap(MERGE_GAP)
         .await?
         .fetch(ranges.to_vec())
